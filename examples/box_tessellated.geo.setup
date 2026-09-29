@@ -1,0 +1,15 @@
+// EXPERIMENTAL: requires MDShapeTESSELLATED to be registered in MDGeometry.
+// Coordinates are centimeters. This is a 20 cm cube centered at the origin.
+
+SurroundingSphere 100.0 0.0 0.0 0.0 100.0
+
+Volume World
+World.Material Vacuum
+World.Shape BRIK 100.0 100.0 100.0
+World.Mother 0
+
+Volume MeshBox
+MeshBox.Material Vacuum
+MeshBox.Shape TESSELLATED 8 -10 -10 -10 10 -10 -10 10 10 -10 -10 10 -10 -10 -10 10 10 -10 10 10 10 10 -10 10 10 12 0 2 1 0 3 2 4 5 6 4 6 7 0 1 5 0 5 4 3 7 6 3 6 2 0 4 7 0 7 3 1 2 6 1 6 5
+MeshBox.Mother World
+MeshBox.Position 0.0 0.0 0.0

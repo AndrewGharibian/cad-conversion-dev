@@ -1,0 +1,11 @@
+# CMake build output
+/build/
+
+# Generated Geomega output
+/output.geo
+
+# Local Visual Studio and CMake settings
+/.vs/
+/CMakeUserPresets.json
+*.user
+*.suo
