@@ -1,0 +1,40 @@
+// Auto-generated from stl_inputs/box2.stl by mesh_to_geomega
+// Mesh coordinates converted from millimeters to centimeters (scale 0.1).
+Include $(MEGALIB)/resource/examples/geomega/materials/Materials.geo
+
+SurroundingSphere 5.4411296307796073 0.0 0.0 0.0 5.4411296307796073
+
+Volume World
+World.Material Vacuum
+World.Shape BRIK 4 4 4
+World.Mother 0
+
+Volume box2
+box2.Material Aluminium
+box2.Color 6
+box2.Visibility 1
+box2.Shape TESSELLATED 8 12
+box2_Shape.Vertices 8
+box2_Shape.Vertex 2.1189788818359374 2.4967100143432619 0
+box2_Shape.Vertex 0 2.4967100143432619 0
+box2_Shape.Vertex 2.1189788818359374 2.4967100143432619 3
+box2_Shape.Vertex 0 2.4967100143432619 3
+box2_Shape.Vertex 2.1189788818359374 0 0
+box2_Shape.Vertex 2.1189788818359374 0 3
+box2_Shape.Vertex 0 0 0
+box2_Shape.Vertex 0 0 3
+box2_Shape.Facets 12
+box2_Shape.Facet 0 1 2
+box2_Shape.Facet 2 1 3
+box2_Shape.Facet 4 0 5
+box2_Shape.Facet 5 0 2
+box2_Shape.Facet 6 4 7
+box2_Shape.Facet 7 4 5
+box2_Shape.Facet 1 6 3
+box2_Shape.Facet 3 6 7
+box2_Shape.Facet 7 5 3
+box2_Shape.Facet 3 5 2
+box2_Shape.Facet 1 0 6
+box2_Shape.Facet 6 0 4
+box2.Mother World
+box2.Position 0.0 0.0 0.0

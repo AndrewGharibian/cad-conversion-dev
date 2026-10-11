@@ -3,6 +3,7 @@
 
 # Generated Geomega output
 /output.geo
+/output.geo.setup
 
 # Local Visual Studio and CMake settings
 /.vs/
