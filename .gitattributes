@@ -1,0 +1,13 @@
+# Normalize line endings so Windows and Linux checkouts produce identical diffs.
+* text=auto
+
+# Shell scripts must keep LF to run on Linux; batch files need CRLF.
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# CAD data: never let git rewrite these (STL may be binary; STEP is compared
+# byte-for-byte by CAD tools).
+*.step -text
+*.stp  -text
+*.stl  -text

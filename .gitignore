@@ -1,0 +1,51 @@
+# ---- CMake build / install trees -------------------------------------------
+build/
+out/
+install/
+cmake-build-*/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# ---- vcpkg -----------------------------------------------------------------
+# Manifest-mode install tree (created next to vcpkg.json if configured outside
+# a preset) and any exported / vendored vcpkg trees. Dependencies are restored
+# from vcpkg.json + builtin-baseline, never committed.
+vcpkg_installed/
+vcpkg/
+vcpkg-export-*/
+OpenCascadeTesting/OCCT/
+
+# ---- Compiled binaries / libraries -----------------------------------------
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# ---- STEP and mesh files ---------------------------------------------------
+*.step
+*.stl
+*.obj
+# ...except the small test models of cad_converter. Large models stay local
+# (tests/data/large/).
+!cad_converter/tests/data/*.step
+cad_converter/tests/data/large/
+OpenCascadeTesting/
+
+
+# ---- IDEs / editors --------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+.DS_Store

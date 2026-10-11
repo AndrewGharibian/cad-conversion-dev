@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "cad-converter",
+  "version-string": "0.1.0",
+  "description": "STEP to simulation-ready meshes for MEGAlib/Geant4, using OpenCASCADE and Manifold",
+  "dependencies": [
+    {
+      "name": "opencascade",
+      "default-features": false
+    },
+    "manifold"
+  ],
+  "builtin-baseline": "b08975f4fdf01ad9a5c08db8f1953a57d11e8b26"
+}
