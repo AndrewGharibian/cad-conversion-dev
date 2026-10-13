@@ -3,7 +3,7 @@
 Converts a STEP model into simulation-ready triangle meshes for MEGAlib /
 Geant4:
 
-**STEP → repair → make solids conform → mesh → resolve overlaps → STL/OBJ**
+**STEP → repair → make solids conform → mesh → resolve overlaps → STL/OBJ/Geomega**
 
 Every solid in the output is a closed, consistently oriented surface (each
 edge on exactly two triangles), no two solids overlap, and every triangle
@@ -58,7 +58,11 @@ For every model in [`tests/data`](tests/data), the tests:
 - check that OBJ independently with `mesh_check` ([`tests/mesh_check.cpp`](tests/mesh_check.cpp)):
   every solid is closed and consistently oriented, and no two solids overlap;
 - convert it again with the default output (STL, one object per part) into
-  an `--output-dir`, and check that the file is there.
+  an `--output-dir`, and check that the file is there;
+- convert it to a Geomega geometry (`--geo`) and check it with `geo_check`
+  ([`tests/geo_check.cpp`](tests/geo_check.cpp)) the way MEGAlib reads it:
+  valid and unique names, the structure of every volume, and every mesh
+  passing `MDShapeTessellated`'s own mesh check (ported into the test).
 
 Unit tests check the object names (`naming`) and which bodies count as
 watertight solids (`watertight`), and `shells_removed` checks that the open
@@ -90,6 +94,7 @@ printed as `WARNING` lines.
 |---|---|
 | `--max-deviation <d>` | Accuracy of the mesh (largest distance from the true surface), in model units. Default: 1/1000 of the model's largest dimension. |
 | `--obj` | Write `model.obj` (Wavefront OBJ, indexed vertices) instead of `model.stl`. |
+| `--geo` | Write a MEGAlib/Geomega geometry instead of `model.stl`: `model.geo.setup` plus one `.geo` mesh file per object in `model_geo/` (see below). |
 | `--output-dir <dir>` | Write the output file into `<dir>` (created if it doesn't exist) instead of next to the input. |
 | `--per-body` | One object per body (`solid_0001`, `solid_0002`, ...) instead of one per part. |
 | `--no-repair` | Skip checking and repairing the CAD geometry. |
@@ -114,6 +119,28 @@ Objects are named as follows:
 
 With `--per-body`, objects are named `solid_0001`, `solid_0002`, ... Coordinates are written with 17 significant digits, so vertices
 shared by touching bodies stay bit-identical.
+
+**Geomega output (`--geo`).** For MEGAlib, with the `TESSELLATED` shape
+(`MDShapeTessellated`):
+
+- `model_geo/<object>.geo`, one file per object: a volume per body
+  (placement), with its `TESSELLATED` shape and embedded mesh
+  (`<volume>_Shape.Vertex x y z` and `<volume>_Shape.Facet i j k`, 0-based,
+  counter-clockwise seen from outside), placed in `World` at position 0.
+  A part placed 12 times gives 12 volumes, `<object>_1` ... `<object>_12`:
+  a Geomega volume has one shape, and MEGAlib needs a point inside each
+  volume.
+- `model.geo.setup`, the file MEGAlib loads: the material list, the
+  surrounding sphere, the world volume, and for each object an `Include` of
+  its mesh file followed by each volume's `Material`, `Color` and
+  `Visibility`. **The materials are placeholders (`Aluminium`)**: set them
+  there.
+
+Lengths are in cm (the STEP model's mm divided by 10), each written with the
+fewest digits that read back exactly. Geomega names allow only letters,
+digits and `_`, so other characters become `_`, and names are made unique
+ignoring case. Mesh file names are cut to 48 characters, since Windows paths
+are limited to 260.
 
 ## 4. How it works
 
@@ -151,6 +178,9 @@ source file, with the reasoning in its header comment.
      body's mesh with Manifold's robust booleans. These come from bodies left
      out of the fuse, interferences the fuse missed, and triangles bulging
      past concave surfaces.
+   - slivers (zero-area triangles, which ROOT and Geant4 reject) are
+     removed by edge flips, without moving the surface.
    - every solid's mesh is checked to be closed. A defective fused solid
      sends its neighbourhood back to step 3.
-6. **Export** ([`export`](src/export.cpp)): one STL or OBJ file.
+6. **Export** ([`export`](src/export.cpp), [`geomega_export`](src/geomega_export.cpp)):
+   one STL or OBJ file, or a Geomega geometry.

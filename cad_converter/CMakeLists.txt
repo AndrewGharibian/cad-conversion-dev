@@ -49,6 +49,7 @@ add_executable(cad_converter
     src/weld.cpp
     src/mesh_cut.cpp
     src/export.cpp
+    src/geomega_export.cpp
 )
 
 # Only the OCCT toolkits used are linked; their dependencies come in

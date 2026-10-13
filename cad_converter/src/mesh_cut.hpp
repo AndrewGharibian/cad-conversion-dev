@@ -37,3 +37,10 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
 // Open edges (used by one triangle) and edges used by more than two
 // triangles, counted on a welded mesh by vertex index.
 void CountEdgeDefects(const SurfaceMesh& mesh, size_t& openEdges, size_t& nonManifoldEdges);
+
+// Removes slivers: triangles whose height (twice the area over the longest
+// edge) is below 'minHeight', i.e. a vertex lying on the opposite edge. Each
+// is fixed by flipping that edge with the neighbouring triangle, which leaves
+// the surface where it was and the mesh closed and oriented. Returns the
+// number of flips; 'remaining' gets the slivers that couldn't be fixed.
+size_t FlipDegenerateTriangles(SurfaceMesh& mesh, double minHeight, size_t& remaining);

@@ -39,6 +39,7 @@ OpenCascadeTesting/OCCT/
 !cad_converter/tests/data/*.step
 cad_converter/tests/data/large/
 OpenCascadeTesting/
+claude_resources/
 
 
 # ---- IDEs / editors --------------------------------------------------------

@@ -7,7 +7,11 @@
 #                        solids overlapping);
 #   convert_stl.<model>  converts it with the default output (STL, one object
 #                        per part), into an --output-dir;
-#   stl_written.<model>  checks that the STL is in that folder.
+#   stl_written.<model>  checks that the STL is in that folder;
+#   convert_geo.<model>  converts it to a Geomega geometry (--geo);
+#   geo_check.<model>    checks that geometry the way MEGAlib reads it
+#                        (geo_check: names, structure, and every mesh passing
+#                        MDShapeTessellated's own mesh check).
 # And "naming" checks the output object names (naming_test.cpp),
 # "watertight" which bodies count as watertight solids (watertight_test.cpp),
 # and "shells_removed" that ShellTest's open sheet (a face lying on the solid,
@@ -16,6 +20,8 @@
 # them with: ctest --test-dir build/<preset> [-C Release] -L large
 # Large models aren't committed: put them in tests/data/large/ (gitignored).
 # =============================================================================
+add_executable(geo_check geo_check.cpp)
+
 add_executable(mesh_check mesh_check.cpp)
 target_link_libraries(mesh_check PRIVATE manifold::manifold)
 if(WIN32)
@@ -67,6 +73,7 @@ foreach(_model IN LISTS _models)
     # Each test converts its own copy, so the outputs land in the build tree.
     set(_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/obj")
     set(_stl_dir "${CMAKE_CURRENT_BINARY_DIR}/stl")
+    set(_geo_dir "${CMAKE_CURRENT_BINARY_DIR}/geo")
     configure_file("${_model}" "${_obj_dir}/${_name}.step" COPYONLY)
     configure_file("${_model}" "${_stl_dir}/${_name}.step" COPYONLY)
 
@@ -78,18 +85,25 @@ foreach(_model IN LISTS _models)
         COMMAND cad_converter --output-dir "${_stl_dir}/out" "${_stl_dir}/${_name}.step")
     add_test(NAME stl_written.${_name}
         COMMAND ${CMAKE_COMMAND} -E md5sum "${_stl_dir}/out/${_name}.stl")
+    add_test(NAME convert_geo.${_name}
+        COMMAND cad_converter --geo --output-dir "${_geo_dir}" "${_model}")
+    add_test(NAME geo_check.${_name}
+        COMMAND geo_check "${_geo_dir}/${_name}.geo.setup")
+    set_tests_properties(convert_geo.${_name} PROPERTIES FIXTURES_SETUP geo.${_name})
+    set_tests_properties(geo_check.${_name} PROPERTIES FIXTURES_REQUIRED geo.${_name})
     set_tests_properties(convert_stl.${_name} PROPERTIES FIXTURES_SETUP stl.${_name})
     set_tests_properties(stl_written.${_name} PROPERTIES FIXTURES_REQUIRED stl.${_name})
 
     set_tests_properties(convert.${_name} PROPERTIES FIXTURES_SETUP output.${_name})
     set_tests_properties(check.${_name} PROPERTIES FIXTURES_REQUIRED output.${_name})
     # The converter reports problems as WARNING/ERROR lines.
-    set_tests_properties(convert.${_name} convert_stl.${_name} PROPERTIES FAIL_REGULAR_EXPRESSION "ERROR;WARNING")
+    set_tests_properties(convert.${_name} convert_stl.${_name} convert_geo.${_name}
+        PROPERTIES FAIL_REGULAR_EXPRESSION "ERROR;WARNING")
 
     file(SIZE "${_model}" _size)
     if(_size GREATER 5000000)
         set_tests_properties(convert.${_name} check.${_name} convert_stl.${_name} stl_written.${_name}
-            PROPERTIES LABELS large TIMEOUT 7200)
+            convert_geo.${_name} geo_check.${_name} PROPERTIES LABELS large TIMEOUT 7200)
     endif()
 endforeach()
 

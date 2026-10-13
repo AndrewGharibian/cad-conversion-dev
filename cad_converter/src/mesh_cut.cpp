@@ -473,3 +473,99 @@ void CountEdgeDefects(const SurfaceMesh& mesh, size_t& openEdges, size_t& nonMan
         nonManifoldEdges += entry.second > 2;
     }
 }
+
+size_t FlipDegenerateTriangles(SurfaceMesh& mesh, double minHeight, size_t& remaining)
+{
+    auto& tris = mesh.triangles;
+    // The sliver's longest edge, as k (the edge tri[k] -> tri[k + 1]), or -1
+    // if the triangle isn't a sliver.
+    auto sliverEdge = [&](const std::array<int, 3>& tri) {
+        const gp_Pnt* p[3] = {&mesh.vertices[tri[0]], &mesh.vertices[tri[1]], &mesh.vertices[tri[2]]};
+        double longest = 0.0;
+        int edge = -1;
+        for (int k = 0; k < 3; ++k)
+        {
+            const double length = p[k]->SquareDistance(*p[(k + 1) % 3]);
+            if (length > longest)
+            {
+                longest = length;
+                edge = k;
+            }
+        }
+        const double twiceArea = gp_Vec(*p[0], *p[1]).Crossed(gp_Vec(*p[0], *p[2])).Magnitude();
+        return edge >= 0 && twiceArea < minHeight * std::sqrt(longest) ? edge : -1;
+    };
+    remaining = 0;
+    if (std::none_of(tris.begin(), tris.end(), [&](const std::array<int, 3>& tri) { return sliverEdge(tri) >= 0; }))
+    {
+        return 0;
+    }
+
+    // Directed edge a -> b to its triangle (each is used once in a closed,
+    // oriented mesh).
+    auto key = [](int a, int b) {
+        return static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32 | static_cast<uint32_t>(b);
+    };
+    std::unordered_map<uint64_t, int> edgeTriangle;
+    auto link = [&](int t, bool add) {
+        for (int k = 0; k < 3; ++k)
+        {
+            const uint64_t edge = key(tris[t][k], tris[t][(k + 1) % 3]);
+            add ? (void)(edgeTriangle[edge] = t) : (void)edgeTriangle.erase(edge);
+        }
+    };
+    for (int t = 0; t < static_cast<int>(tris.size()); ++t)
+    {
+        link(t, true);
+    }
+
+    // Sliver (a, b, c) with c on its longest edge ab, and the neighbour
+    // (b, a, d) across ab: the pair becomes (c, a, d) and (d, b, c). Their
+    // outline (b, c, a, d) is the same, so the surface stays put, and the
+    // new edge cd is used once in each direction. A flip can leave another
+    // sliver (d on the same line), hence the passes.
+    size_t flips = 0;
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        bool changed = false;
+        for (int t = 0; t < static_cast<int>(tris.size()); ++t)
+        {
+            const int k = sliverEdge(tris[t]);
+            if (k < 0)
+            {
+                continue;
+            }
+            const int a = tris[t][k], b = tris[t][(k + 1) % 3], c = tris[t][(k + 2) % 3];
+            const auto across = edgeTriangle.find(key(b, a));
+            if (across == edgeTriangle.end())
+            {
+                continue;
+            }
+            const int u = across->second;
+            int d = -1;
+            for (int v : tris[u])
+            {
+                d = v != a && v != b ? v : d;
+            }
+            if (d < 0 || d == c || edgeTriangle.count(key(c, d)) || edgeTriangle.count(key(d, c)))
+            {
+                continue;
+            }
+            link(t, false);
+            link(u, false);
+            tris[t] = {c, a, d};
+            tris[u] = {d, b, c};
+            link(t, true);
+            link(u, true);
+            ++flips;
+            changed = true;
+        }
+        if (!changed)
+        {
+            break;
+        }
+    }
+    remaining = static_cast<size_t>(
+        std::count_if(tris.begin(), tris.end(), [&](const std::array<int, 3>& tri) { return sliverEdge(tri) >= 0; }));
+    return flips;
+}
