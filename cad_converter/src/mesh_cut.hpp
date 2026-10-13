@@ -25,16 +25,14 @@ struct MeshCutReport
     std::vector<std::string> problems; // pairs or bodies that couldn't be handled
 };
 
-// meshes[i] is body i's closed mesh; isSolid[i] says whether it encloses a
-// volume (only solids take part). Every pair of solids whose meshes overlap
-// is resolved: the larger body (by mesh volume) loses the overlap. Meshes
+// meshes[i] is body i's closed mesh (empty if it was dropped). Every pair of
+// solids whose meshes overlap is resolved: the larger body (by mesh volume) loses the overlap. Meshes
 // are replaced in place.
 //
 // part[i] >= 0 says which part body i is a placement of (bodies with the
 // same value are copies of one part); -1 if unknown. Placements of one part
 // that cut the same body are merged into one cutter.
-MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::vector<char>& isSolid,
-                                   const std::vector<int>& part);
+MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::vector<int>& part);
 
 // Open edges (used by one triangle) and edges used by more than two
 // triangles, counted on a welded mesh by vertex index.

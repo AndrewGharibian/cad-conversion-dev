@@ -22,9 +22,7 @@
 //      on bodies that fail. STEPControl_Reader already runs a round of shape
 //      healing during import, so most bodies arrive valid.
 //
-// A "body" is a solid, a shell that isn't part of a solid, or a loose face.
-// Open shells (surfaces with no enclosed volume) are counted separately:
-// they can't become simulation volumes as they are.
+// A "body" is a solid (step_import.cpp has already removed everything else).
 // =============================================================================
 #include "repair.hpp"
 
@@ -71,25 +69,7 @@ TopoDS_Shape CheckAndRepair(const TopoDS_Shape& shape)
     size_t placements = 0;
     std::vector<TopoDS_Shape> bodies = UniqueBodies(shape, &placements);
 
-    size_t solids = 0, shells = 0, openShells = 0, faces = 0;
-    for (const TopoDS_Shape& body : bodies)
-    {
-        switch (body.ShapeType())
-        {
-        case TopAbs_SOLID: ++solids; break;
-        case TopAbs_SHELL:
-            ++shells;
-            if (!BRep_Tool::IsClosed(body))
-            {
-                ++openShells;
-            }
-            break;
-        default: ++faces; break;
-        }
-    }
-    std::cout << "  " << bodies.size() << " unique bodies (" << placements << " placed): " << solids << " solid(s), "
-              << shells << " shell(s) (" << openShells << " open, i.e. no enclosed volume), " << faces
-              << " loose face(s)\n";
+    std::cout << "  " << bodies.size() << " unique solids (" << placements << " placed)\n";
 
     std::vector<char> valid;
     {

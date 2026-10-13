@@ -5,8 +5,8 @@
 //   mesh_check model.obj
 //
 // Use it on output written with --per-body, where every object is one body
-// and solids are named solid_NNNN (shells and faces enclose no volume and
-// are skipped). For every solid:
+// and solids are named solid_NNNN (any other object is skipped). For every
+// solid:
 //   - every edge is used by exactly two triangles, in opposite directions
 //     (a closed, consistently oriented surface);
 //   - Manifold accepts it as a closed 2-manifold, with a positive volume.

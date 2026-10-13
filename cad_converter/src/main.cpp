@@ -9,8 +9,8 @@
 //   --obj                 write model.obj (Wavefront OBJ) instead of model.stl
 //   --output-dir <dir>    write the output file into <dir> (created if
 //                         missing) instead of next to the input
-//   --per-body            write every body as its own object, instead of one
-//                         object per part (all its placements together)
+//   --per-body            write every body as its own object (solid_NNNN, ...),
+//                         instead of one object per part (all its placements)
 //   --no-repair           skip checking and repairing the CAD geometry
 //   --no-collisions       don't make the solids conform: they keep their
 //                         modeled shape, so overlaps stay and touching meshes
@@ -20,15 +20,18 @@
 //
 // Debugging big models: --dump-fused <file.brep> saves the conformed model
 // (read, repaired, made conformal, after all checks; no mesh), with
-// <file.brep>.parts (each body's part name) and <file.brep>.meshcut (the
+// <file.brep>.parts (each body's part) and <file.brep>.meshcut (the
 // bodies left out of the fuse). Giving that .brep file as the input instead
 // of a STEP file skips straight to meshing.
 //
 // The pipeline:
-//   1. Read the STEP file (step_import.cpp), check and repair every unique
-//      part, fix faces the import put on the wrong arc (folded_faces.cpp),
-//      and put every revolved face's seam at U = 0 (repair.cpp).
-//   2. List the bodies: every placed solid, shell and face.
+//   1. Read the STEP file (step_import.cpp), keeping only its solids: shells
+//      and loose faces are removed, since Geant4 and ROOT need watertight
+//      solids. Check and repair every unique part, fix faces the import put
+//      on the wrong arc (folded_faces.cpp), and put every revolved face's
+//      seam at U = 0 (repair.cpp).
+//   2. List the bodies: every placed solid. A solid whose shell is still open
+//      after repair isn't watertight, and is removed.
 //   3. Make the solids conform (conform.cpp): a general fuse makes touching
 //      solids share faces and gives every overlap to the smaller solid.
 //      Modeled threads (thread_pairs.cpp) and pairs the fuse breaks are left
@@ -158,6 +161,39 @@ bool ParseArguments(int argc, char** argv, Options& options)
     return true;
 }
 
+// Removes every body that isn't a watertight solid (IsWatertight), and
+// numbers the rest solid_0001, solid_0002, ... in order.
+void RemoveOpenSolids(std::vector<Body>& bodies)
+{
+    std::vector<std::string> removed;
+    std::vector<Body> kept;
+    for (Body& body : bodies)
+    {
+        if (IsWatertight(body.shape))
+        {
+            kept.push_back(std::move(body));
+        }
+        else
+        {
+            removed.push_back(body.part.empty() ? body.name : body.name + " (" + body.part + ")");
+        }
+    }
+    if (!removed.empty())
+    {
+        std::cout << "  WARNING: removed " << removed.size() << " solid(s) that aren't watertight (open shell):";
+        for (size_t i = 0; i < removed.size() && i < 10; ++i)
+        {
+            std::cout << " " << removed[i];
+        }
+        std::cout << (removed.size() > 10 ? " ..." : "") << "\n";
+    }
+    for (size_t i = 0; i < kept.size(); ++i)
+    {
+        kept[i].name = SolidName(i);
+    }
+    bodies = std::move(kept);
+}
+
 // Steps 1-3: read the STEP file, repair it, list the bodies and make the
 // solids conform. Sets 'maxDeviation' and fills 'fuse' (for later local
 // re-fuses).
@@ -167,11 +203,11 @@ std::vector<Body> ReadAndPrepare(const Options& options, double& maxDeviation, F
     TopoDS_Shape shape = step.shape;
     // Each placed body's part, in PlacedBodies order (every stage below keeps
     // the bodies in that order, so this maps onto them later).
-    std::vector<std::string> partOfBody;
+    std::vector<PartInfo> partOfBody;
     for (const Body& body : PlacedBodies(shape))
     {
-        auto found = step.partNames.find(body.shape.TShape().get());
-        partOfBody.push_back(found != step.partNames.end() ? found->second : std::string());
+        auto found = step.parts.find(body.shape.TShape().get());
+        partOfBody.push_back(found != step.parts.end() ? found->second : PartInfo{});
     }
 
     // Some STEP translators leave edges with only a 2D curve on their surface;
@@ -194,19 +230,32 @@ std::vector<Body> ReadAndPrepare(const Options& options, double& maxDeviation, F
         shape = NormalizePeriodicSeams(shape);
     }
 
-    // The accuracy limit drives every meshing step.
-    maxDeviation = options.maxDeviation > 0.0 ? options.maxDeviation : DefaultMaxDeviation(shape);
-    std::cout << "  mesh accuracy limit: " << maxDeviation << " (model units)\n";
-
     std::vector<Body> bodies = PlacedBodies(shape);
     if (partOfBody.size() == bodies.size())
     {
         for (size_t i = 0; i < bodies.size(); ++i)
         {
-            bodies[i].part = partOfBody[i];
+            bodies[i].part = partOfBody[i].name;
+            bodies[i].partBodies = partOfBody[i].bodies;
         }
     }
+    RemoveOpenSolids(bodies);
     std::cout << "  " << bodies.size() << " bodies\n";
+    if (bodies.empty())
+    {
+        throw std::runtime_error("The model has no watertight solids: " + options.input);
+    }
+
+    // The accuracy limit drives every meshing step.
+    TopoDS_Compound kept;
+    BRep_Builder builder;
+    builder.MakeCompound(kept);
+    for (const Body& body : bodies)
+    {
+        builder.Add(kept, body.shape);
+    }
+    maxDeviation = options.maxDeviation > 0.0 ? options.maxDeviation : DefaultMaxDeviation(kept);
+    std::cout << "  mesh accuracy limit: " << maxDeviation << " (model units)\n";
 
     if (options.collisions)
     {
@@ -228,17 +277,17 @@ std::vector<Body> LoadSavedModel(const Options& options, double& maxDeviation)
     std::vector<Body> bodies;
     for (TopoDS_Iterator it(loaded); it.More(); it.Next())
     {
-        const bool isSolid = TopExp_Explorer(it.Value(), TopAbs_SOLID).More();
-        std::ostringstream name;
-        name << (isSolid ? "solid" : (it.Value().ShapeType() == TopAbs_FACE ? "face" : "shell")) << "_"
-             << std::setw(4) << std::setfill('0') << bodies.size() + 1;
-        bodies.push_back({name.str(), it.Value(), isSolid});
+        bodies.push_back({SolidName(bodies.size()), it.Value()});
     }
+    // Each line: the number of bodies in one placement of the part, a tab,
+    // and the part's name.
     std::ifstream partList(options.input + ".parts");
-    std::string partName;
-    for (size_t index = 0; index < bodies.size() && std::getline(partList, partName); ++index)
+    std::string line;
+    for (size_t index = 0; index < bodies.size() && std::getline(partList, line); ++index)
     {
-        bodies[index].part = partName;
+        const size_t tab = line.find('\t');
+        bodies[index].partBodies = tab == std::string::npos ? 1 : std::max<size_t>(1, std::stoul(line.substr(0, tab)));
+        bodies[index].part = tab == std::string::npos ? line : line.substr(tab + 1);
     }
     std::ifstream meshCutList(options.input + ".meshcut");
     for (size_t index; meshCutList >> index;)
@@ -268,7 +317,7 @@ void SaveModel(const std::vector<Body>& bodies, const std::string& path)
     std::ofstream partList(path + ".parts");
     for (const Body& body : bodies)
     {
-        partList << body.part << "\n";
+        partList << body.partBodies << '\t' << body.part << "\n";
     }
     std::ofstream meshCutList(path + ".meshcut");
     for (size_t i = 0; i < bodies.size(); ++i)
@@ -377,17 +426,15 @@ std::vector<SurfaceMesh> CutAndCount(const std::vector<Body>& bodies, const std:
     if (cut)
     {
         StageTimer timer("cutting every overlap between solid meshes");
-        std::vector<char> isSolid;
         std::vector<int> part;
         std::map<std::string, int> partIds;
         for (const Body& body : bodies)
         {
-            isSolid.push_back(body.isSolid);
             part.push_back(body.meshCut && !body.part.empty()
                                ? partIds.emplace(body.part, static_cast<int>(partIds.size())).first->second
                                : -1);
         }
-        const MeshCutReport report = CutOverlappingMeshes(meshes, isSolid, part);
+        const MeshCutReport report = CutOverlappingMeshes(meshes, part);
         std::cout << "  " << report.overlappingPairs << " overlapping pair(s); " << report.bodiesCut
                   << " larger body(ies) lost a total volume of " << report.volumeRemoved << "; "
                   << report.mergedCutters << " cut(s) merged several placements of a part into one cutter; "
@@ -412,9 +459,7 @@ std::vector<SurfaceMesh> CutAndCount(const std::vector<Body>& bodies, const std:
 
 // Prints mesh quality, and warns about anything that would make the mesh
 // unusable for simulation: a solid whose mesh has holes (open edges), edges
-// shared by more than two triangles, or a deviation above the limit. Open
-// shells and loose faces are open by nature (they enclose no volume), so
-// they are counted but not warned about.
+// shared by more than two triangles, or a deviation above the limit.
 void ReportMeshQuality(const MeshQuality& q, const std::vector<Body>& bodies, double maxDeviation)
 {
     std::string sampled;
@@ -431,22 +476,14 @@ void ReportMeshQuality(const MeshQuality& q, const std::vector<Body>& bodies, do
         std::cout << "    " << note << "\n";
     }
 
-    size_t closedSolids = 0, openShells = 0, closedShells = 0;
+    size_t closedSolids = 0;
     std::vector<std::string> leakySolids;
     for (size_t i = 0; i < bodies.size(); ++i)
     {
-        const bool open = q.openEdgesPerBody[i] > 0;
-        if (bodies[i].isSolid)
-        {
-            open ? leakySolids.push_back(bodies[i].name) : (void)++closedSolids;
-        }
-        else
-        {
-            open ? ++openShells : ++closedShells;
-        }
+        q.openEdgesPerBody[i] > 0 ? leakySolids.push_back(bodies[i].name) : (void)++closedSolids;
     }
-    std::cout << "  bodies: " << closedSolids << " closed solid(s), " << leakySolids.size() << " solid(s) with holes, "
-              << closedShells << " closed shell(s), " << openShells << " open shell(s)/face(s) (no volume)\n";
+    std::cout << "  bodies: " << closedSolids << " closed solid(s), " << leakySolids.size()
+              << " solid(s) with holes\n";
 
     if (!leakySolids.empty())
     {
@@ -553,7 +590,7 @@ int main(int argc, char** argv)
         ReportMeshQuality(quality, bodies, maxDeviation);
 
         // Step 6: one named mesh per part (or per body) in one STL or OBJ file.
-        const std::vector<OutputObject> objects = GroupBodies(bodies, options.perBody);
+        const std::vector<OutputObject> objects = GroupBodies(bodies, meshes, options.perBody);
         fs::path outputPath = fs::path(options.input).replace_extension(options.writeObj ? ".obj" : ".stl");
         if (!options.outputDir.empty())
         {

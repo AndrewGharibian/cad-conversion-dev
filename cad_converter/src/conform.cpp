@@ -25,8 +25,7 @@
 //     part placed twice, is dropped.
 // A body can end up as several pieces (its own part, plus overlaps it was
 // given). They share internal faces, which the mesher skips, so the body is
-// still one closed surface. Only solids take part: open shells and faces
-// enclose no volume.
+// still one closed surface.
 //
 // Options: SetNonDestructive keeps the inputs untouched (placements of the
 // same part share geometry); SetFuzzyValue lets faces that are *almost*
@@ -336,7 +335,7 @@ struct FaceUsers
     {
         for (size_t i = 0; i < bodies.size(); ++i)
         {
-            if (!bodies[i].isSolid || bodies[i].meshCut || bodies[i].shape.IsNull())
+            if (bodies[i].meshCut || bodies[i].shape.IsNull())
             {
                 continue;
             }
@@ -565,7 +564,7 @@ std::set<std::string> RepairFuse(std::vector<Body>& bodies, const FuseContext& c
         std::vector<size_t> toCheck;
         for (size_t i = 0; i < bodies.size(); ++i)
         {
-            if (bodies[i].isSolid && !bodies[i].meshCut && check.count(bodies[i].name))
+            if (!bodies[i].meshCut && check.count(bodies[i].name))
             {
                 toCheck.push_back(i);
             }
@@ -597,14 +596,10 @@ FuseContext MakeBodiesConformal(std::vector<Body>& bodies, double maxDeviation, 
     Bnd_Box box;
     for (size_t i = 0; i < bodies.size(); ++i)
     {
-        if (bodies[i].isSolid)
-        {
-            solids.push_back(i);
-            BRepBndLib::Add(bodies[i].shape, box);
-        }
+        solids.push_back(i);
+        BRepBndLib::Add(bodies[i].shape, box);
     }
-    std::cout << "  " << solids.size() << " solid(s) take part (" << (bodies.size() - solids.size())
-              << " shell/face bodies have no volume)\n";
+    std::cout << "  " << solids.size() << " solid(s) take part\n";
     if (solids.size() < 2)
     {
         return context;
@@ -719,7 +714,7 @@ FuseContext MakeBodiesConformal(std::vector<Body>& bodies, double maxDeviation, 
     std::set<std::string> fused;
     for (const Body& body : bodies)
     {
-        if (body.isSolid && !body.meshCut)
+        if (!body.meshCut)
         {
             fused.insert(body.name);
         }
@@ -770,7 +765,7 @@ std::vector<size_t> PartnersOfMeshDefects(const std::vector<Body>& bodies, const
     std::set<size_t> result;
     for (size_t d = 0; d < bodies.size(); ++d)
     {
-        if (!bodies[d].isSolid || bodies[d].meshCut || meshes[d].triangles.empty())
+        if (bodies[d].meshCut || meshes[d].triangles.empty())
         {
             continue;
         }
@@ -804,7 +799,7 @@ std::vector<size_t> PartnersOfMeshDefects(const std::vector<Body>& bodies, const
         std::vector<size_t> partners;
         for (size_t j = 0; j < bodies.size(); ++j)
         {
-            if (j == d || !bodies[j].isSolid || boxes[j].IsOut(defectBox))
+            if (j == d || boxes[j].IsOut(defectBox))
             {
                 continue;
             }

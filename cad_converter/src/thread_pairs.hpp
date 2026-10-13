@@ -18,9 +18,7 @@
 
 struct ThreadPair
 {
-    size_t a = 0, b = 0;   // indices into the 'solids' argument, a < b
-    size_t nearSamples = 0; // sample points found just inside the other solid
-    size_t samples = 0;     // sample points tested on the freeform faces involved
+    size_t a = 0, b = 0; // indices into the 'solids' argument, a < b
 };
 
 // Every pair of solids where a freeform (non-analytic) face of one lies inside

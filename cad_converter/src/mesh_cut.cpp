@@ -46,6 +46,8 @@
 
 #include <manifold/manifold.h>
 
+#include <OSD_Parallel.hxx>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -67,10 +69,14 @@ constexpr double kMinRemainingFraction = 0.01;
 // Rounds of checking and cutting (see CutOverlappingMeshes); the last one
 // only checks.
 constexpr int kMaxRounds = 4;
-manifold::MeshGL64 ToManifoldMesh(const SurfaceMesh& mesh)
+// 'originalID' (from Manifold::ReserveIDs) names the mesh. Manifold sorts a
+// result's triangles by the IDs of the meshes they came from, so IDs given
+// in a fixed order keep the output the same however the work is scheduled.
+manifold::MeshGL64 ToManifoldMesh(const SurfaceMesh& mesh, uint32_t originalID)
 {
     manifold::MeshGL64 gl;
     gl.numProp = 3;
+    gl.runOriginalID = {originalID};
     gl.vertProperties.reserve(3 * mesh.vertices.size());
     for (const gp_Pnt& p : mesh.vertices)
     {
@@ -216,14 +222,13 @@ bool CloseZeroThicknessSlits(SurfaceMesh& mesh)
 }
 } // namespace
 
-MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::vector<char>& isSolid,
-                                   const std::vector<int>& part)
+MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::vector<int>& part)
 {
     MeshCutReport report;
     const size_t n = meshes.size();
-    auto takesPart = [&](size_t i) { return isSolid[i] && !meshes[i].triangles.empty(); };
+    auto takesPart = [&](size_t i) { return !meshes[i].triangles.empty(); };
 
-    // Each body's mesh as a Manifold (built on first use by get() below).
+    // Each body's mesh as a Manifold, built when a pair first needs it.
     std::vector<std::unique_ptr<manifold::Manifold>> solids(n);
     std::vector<double> volume(n, 0.0);
 
@@ -239,29 +244,13 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
     // A mesh Manifold rejects (not closed, or not consistently oriented)
     // can't be cut.
     std::vector<char> rejected(n, 0);
-    auto get = [&](size_t i) -> const manifold::Manifold* {
-        if (rejected[i])
-        {
-            return nullptr;
-        }
-        if (!solids[i])
-        {
-            auto m = std::make_unique<manifold::Manifold>(ToManifoldMesh(meshes[i]));
-            if (m->Status() != manifold::Manifold::Error::NoError)
-            {
-                rejected[i] = 1;
-                std::ostringstream problem;
-                problem << "body #" << i << ": its mesh is not a closed surface, so overlaps with it can't be cut"
-                        << " (Manifold error " << static_cast<int>(m->Status()) << ")";
-                report.problems.push_back(problem.str());
-                return nullptr;
-            }
-            volume[i] = m->Volume();
-            solids[i] = std::move(m);
-        }
-        return solids[i].get();
-    };
 
+    // The work is spread over all cores: the Manifold objects are built, the
+    // pairs tested and the bodies cut in parallel (each task only reads the
+    // shared Manifolds). Everything that depends on order (the problems
+    // reported, the operands of each cut, the sums) is collected afterwards
+    // in index order, so the result is the same as a serial run.
+    //
     // Every overlapping pair of solids: the larger body (ties: the later one)
     // loses the overlap to the smaller. Cutting moves no vertex by more than
     // Manifold's precision, but two bodies cut separately (by the same small
@@ -271,8 +260,17 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
     std::vector<char> active(n, 1);
     for (int round = 0; round < kMaxRounds; ++round)
     {
-        std::vector<std::vector<size_t>> smallerOverlaps(n);
-        size_t pairs = 0;
+        // The candidate pairs, and the Manifolds they need, in first-use order.
+        std::vector<std::pair<size_t, size_t>> candidates;
+        std::vector<size_t> toBuild;
+        std::vector<char> queued(n, 0);
+        auto need = [&](size_t i) {
+            if (!solids[i] && !rejected[i] && !queued[i])
+            {
+                queued[i] = 1;
+                toBuild.push_back(i);
+            }
+        };
         for (size_t i = 0; i < n; ++i)
         {
             if (!takesPart(i))
@@ -285,21 +283,54 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
                 {
                     continue;
                 }
-                const manifold::Manifold* a = get(i);
-                const manifold::Manifold* b = get(j);
-                if (!a || !b)
-                {
-                    continue;
-                }
-                const double common = (*a ^ *b).Volume();
-                if (common <= kMinOverlapFraction * std::min(volume[i], volume[j]))
-                {
-                    continue;
-                }
-                ++pairs;
-                const bool iLoses = volume[i] > volume[j];
-                smallerOverlaps[iLoses ? i : j].push_back(iLoses ? j : i);
+                need(i);
+                need(j);
+                candidates.emplace_back(i, j);
             }
+        }
+        std::vector<std::unique_ptr<manifold::Manifold>> built(toBuild.size());
+        const uint32_t firstID = manifold::Manifold::ReserveIDs(static_cast<uint32_t>(toBuild.size()));
+        OSD_Parallel::For(0, static_cast<int>(toBuild.size()), [&](int k) {
+            built[k] = std::make_unique<manifold::Manifold>(
+                ToManifoldMesh(meshes[toBuild[k]], firstID + static_cast<uint32_t>(k)));
+            built[k]->Status(); // evaluate it here, in parallel
+        });
+        for (size_t k = 0; k < toBuild.size(); ++k)
+        {
+            const size_t i = toBuild[k];
+            if (built[k]->Status() != manifold::Manifold::Error::NoError)
+            {
+                rejected[i] = 1;
+                std::ostringstream problem;
+                problem << "body #" << i << ": its mesh is not a closed surface, so overlaps with it can't be cut"
+                        << " (Manifold error " << static_cast<int>(built[k]->Status()) << ")";
+                report.problems.push_back(problem.str());
+                continue;
+            }
+            volume[i] = built[k]->Volume();
+            solids[i] = std::move(built[k]);
+        }
+
+        std::vector<double> common(candidates.size(), 0.0);
+        OSD_Parallel::For(0, static_cast<int>(candidates.size()), [&](int k) {
+            const auto [i, j] = candidates[k];
+            if (solids[i] && solids[j])
+            {
+                common[k] = (*solids[i] ^ *solids[j]).Volume();
+            }
+        });
+        std::vector<std::vector<size_t>> smallerOverlaps(n);
+        size_t pairs = 0;
+        for (size_t k = 0; k < candidates.size(); ++k)
+        {
+            const auto [i, j] = candidates[k];
+            if (!solids[i] || !solids[j] || common[k] <= kMinOverlapFraction * std::min(volume[i], volume[j]))
+            {
+                continue;
+            }
+            ++pairs;
+            const bool iLoses = volume[i] > volume[j];
+            smallerOverlaps[iLoses ? i : j].push_back(iLoses ? j : i);
         }
         if (pairs == 0)
         {
@@ -314,14 +345,22 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
             break;
         }
 
-        std::vector<char> cutNow(n, 0);
-        std::vector<SurfaceMesh> cutMeshes(n);
+        std::vector<size_t> losers;
         for (size_t i = 0; i < n; ++i)
         {
-            if (smallerOverlaps[i].empty())
+            if (!smallerOverlaps[i].empty())
             {
-                continue;
+                losers.push_back(i);
             }
+        }
+        struct Cut
+        {
+            manifold::Manifold result;
+            size_t mergedCutters = 0;
+        };
+        std::vector<Cut> cuts(losers.size());
+        OSD_Parallel::For(0, static_cast<int>(losers.size()), [&](int k) {
+            const size_t i = losers[k];
             // One cutter per repeated part (its placements that cut this body,
             // merged into one mesh), and one per other smaller body.
             std::map<int, std::vector<manifold::Manifold>> byPart;
@@ -345,9 +384,20 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
                     continue;
                 }
                 operands.push_back(manifold::Manifold::BatchBoolean(entry.second, manifold::OpType::Add));
-                ++report.mergedCutters;
+                ++cuts[k].mergedCutters;
             }
-            const manifold::Manifold result = manifold::Manifold::BatchBoolean(operands, manifold::OpType::Subtract);
+            cuts[k].result = manifold::Manifold::BatchBoolean(operands, manifold::OpType::Subtract);
+            cuts[k].result.Status(); // evaluate it here, in parallel
+        });
+
+        std::vector<char> cutNow(n, 0);
+        std::vector<SurfaceMesh> cutMeshes(n);
+        std::vector<char> keep(losers.size(), 0);
+        for (size_t k = 0; k < losers.size(); ++k)
+        {
+            const size_t i = losers[k];
+            const manifold::Manifold& result = cuts[k].result;
+            report.mergedCutters += cuts[k].mergedCutters;
             if (result.Status() != manifold::Manifold::Error::NoError)
             {
                 std::ostringstream problem;
@@ -368,8 +418,20 @@ MeshCutReport CutOverlappingMeshes(std::vector<SurfaceMesh>& meshes, const std::
                 report.problems.push_back(problem.str());
                 continue; // cutMeshes[i] stays empty
             }
-            cutMeshes[i] = FromManifoldMesh(result.GetMeshGL64());
-            report.slitsClosed += CloseZeroThicknessSlits(cutMeshes[i]) ? 1 : 0;
+            keep[k] = 1;
+        }
+        std::vector<char> slitClosed(losers.size(), 0);
+        OSD_Parallel::For(0, static_cast<int>(losers.size()), [&](int k) {
+            if (keep[k])
+            {
+                const size_t i = losers[k];
+                cutMeshes[i] = FromManifoldMesh(cuts[k].result.GetMeshGL64());
+                slitClosed[k] = CloseZeroThicknessSlits(cutMeshes[i]) ? 1 : 0;
+            }
+        });
+        for (char closed : slitClosed)
+        {
+            report.slitsClosed += closed;
         }
         // Use the cut meshes only now, so every body of this round was cut by
         // the others' meshes as they were before it.

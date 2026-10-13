@@ -18,7 +18,9 @@ struct OutputObject
 };
 
 // One object per part (all its placements), or with 'perBody' one per body.
-std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, bool perBody);
+// Bodies whose mesh is empty (dropped) are left out. Naming: see export.cpp.
+std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, const std::vector<SurfaceMesh>& meshes,
+                                      bool perBody);
 
 // Multi-solid ASCII STL: one "solid <name> ... endsolid <name>" block per object.
 void ExportStl(const std::vector<OutputObject>& objects, const std::vector<SurfaceMesh>& meshes,

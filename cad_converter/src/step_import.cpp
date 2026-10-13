@@ -9,14 +9,19 @@
 // placements, which share its TopoDS_TShape at different locations. So the
 // part a placed solid belongs to is found by its TShape.
 //
-// The whole model comes back as one shape: the top-level (free) shape, or a
-// compound of them if there are several.
+// The model comes back as one compound of its placed solids. Everything else
+// (shells that aren't part of a solid, loose faces) is removed here, before
+// any conversion: Geant4 and ROOT need every volume to be a closed,
+// watertight mesh, and a surface encloses no volume. (In cosi_test.step these
+// are the PCB copper layers, exported as zero-thickness faces.) A solid whose
+// own shell is open is removed later, after repair (IsWatertight).
 // =============================================================================
 #include "step_import.hpp"
 
 #include "stage_timer.hpp"
 
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <NCollection_Sequence.hxx>
 #include <STEPCAFControl_Reader.hxx>
@@ -26,12 +31,14 @@
 #include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -87,8 +94,33 @@ StepModel ReadStep(const std::string& path)
         throw std::runtime_error("No shapes could be transferred from: " + path);
     }
 
+    // Keep only the placed solids. Placements still share their part's
+    // TopoDS_TShape, which the stages below rely on.
+    size_t shells = 0, faces = 0;
+    for (TopExp_Explorer exp(model.shape, TopAbs_SHELL, TopAbs_SOLID); exp.More(); exp.Next())
+    {
+        ++shells;
+    }
+    for (TopExp_Explorer exp(model.shape, TopAbs_FACE, TopAbs_SHELL); exp.More(); exp.Next())
+    {
+        ++faces;
+    }
+    TopoDS_Compound solids;
+    BRep_Builder builder;
+    builder.MakeCompound(solids);
+    for (TopExp_Explorer exp(model.shape, TopAbs_SOLID); exp.More(); exp.Next())
+    {
+        builder.Add(solids, exp.Current());
+    }
+    model.shape = solids;
+    if (shells + faces > 0)
+    {
+        std::cout << "  removed " << shells << " shell(s) and " << faces
+                  << " loose face(s): surfaces, not watertight solids\n";
+    }
+
     // Every part (a label with a shape of its own, not an assembly), by the
-    // bodies in its shape.
+    // solids in its shape. A part without solids isn't written at all.
     NCollection_Sequence<TDF_Label> parts;
     shapes->GetShapes(parts);
     for (const TDF_Label& label : parts)
@@ -98,17 +130,34 @@ StepModel ReadStep(const std::string& path)
         {
             continue;
         }
-        const std::string partName = TCollection_AsciiString(name->Get()).ToCString();
         const TopoDS_Shape partShape = shapes->GetShape(label);
-        for (TopAbs_ShapeEnum type : {TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE})
+        const PartInfo part{TCollection_AsciiString(name->Get()).ToCString(), PlacedBodies(partShape).size()};
+        for (TopExp_Explorer exp(partShape, TopAbs_SOLID); exp.More(); exp.Next())
         {
-            for (TopExp_Explorer exp(partShape, type); exp.More(); exp.Next())
-            {
-                model.partNames.emplace(exp.Current().TShape().get(), partName);
-            }
+            model.parts.emplace(exp.Current().TShape().get(), part);
         }
     }
     return model;
+}
+
+// A solid is watertight if it has a shell and every shell (the outer one and
+// any voids) is closed: each edge bounds exactly two of its faces.
+bool IsWatertight(const TopoDS_Shape& solid)
+{
+    if (solid.ShapeType() != TopAbs_SOLID)
+    {
+        return false;
+    }
+    bool hasShell = false;
+    for (TopExp_Explorer exp(solid, TopAbs_SHELL); exp.More(); exp.Next())
+    {
+        hasShell = true;
+        if (!BRep_Tool::IsClosed(TopoDS::Shell(exp.Current())))
+        {
+            return false;
+        }
+    }
+    return hasShell;
 }
 
 // A part placed several times shares one TopoDS_TShape at different
@@ -129,14 +178,6 @@ std::vector<TopoDS_Shape> UniqueBodies(const TopoDS_Shape& shape, size_t* placem
     {
         add(exp.Current());
     }
-    for (TopExp_Explorer exp(shape, TopAbs_SHELL, TopAbs_SOLID); exp.More(); exp.Next())
-    {
-        add(exp.Current());
-    }
-    for (TopExp_Explorer exp(shape, TopAbs_FACE, TopAbs_SHELL); exp.More(); exp.Next())
-    {
-        add(exp.Current());
-    }
     if (placements)
     {
         *placements = count;
@@ -144,27 +185,21 @@ std::vector<TopoDS_Shape> UniqueBodies(const TopoDS_Shape& shape, size_t* placem
     return bodies;
 }
 
+std::string SolidName(size_t index)
+{
+    std::ostringstream name;
+    name << "solid_" << std::setw(4) << std::setfill('0') << index + 1;
+    return name.str();
+}
+
 // UniqueBodies collapses repeated placements; this keeps each one, since each
 // is its own volume.
 std::vector<Body> PlacedBodies(const TopoDS_Shape& shape)
 {
     std::vector<Body> bodies;
-    auto add = [&](const TopoDS_Shape& s, const char* kind) {
-        std::ostringstream name;
-        name << kind << "_" << std::setw(4) << std::setfill('0') << bodies.size() + 1;
-        bodies.push_back({name.str(), s, s.ShapeType() == TopAbs_SOLID});
-    };
     for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next())
     {
-        add(exp.Current(), "solid");
-    }
-    for (TopExp_Explorer exp(shape, TopAbs_SHELL, TopAbs_SOLID); exp.More(); exp.Next())
-    {
-        add(exp.Current(), "shell");
-    }
-    for (TopExp_Explorer exp(shape, TopAbs_FACE, TopAbs_SHELL); exp.More(); exp.Next())
-    {
-        add(exp.Current(), "face");
+        bodies.push_back({SolidName(bodies.size()), exp.Current()});
     }
     return bodies;
 }

@@ -32,7 +32,8 @@
 //      points and at least kMinNearFraction of its samples are near. A face
 //      that merely cuts through the other solid only has near points along
 //      the intersection line, a small fraction of its samples.
-// Both directions are tested (a's faces in b, b's faces in a).
+// Both directions are tested (a's faces in b, b's faces in a), up to the
+// first face that qualifies.
 // =============================================================================
 #include "thread_pairs.hpp"
 
@@ -52,7 +53,6 @@
 #include <gp_Pnt2d.hxx>
 
 #include <algorithm>
-#include <iterator>
 #include <limits>
 #include <memory>
 
@@ -111,14 +111,15 @@ std::vector<gp_Pnt> SampleFace(const TopoDS_Face& face)
     return points;
 }
 
-// Tests the freeform faces of 'from' against the solid 'into'. Returns the
-// best face's (near, samples) counts, or (0, 0) if no face qualifies.
-std::pair<size_t, size_t> NearSamples(const SolidInfo& from, const SolidInfo& intoInfo, const TopoDS_Shape& into,
-                                      double depthLimit)
+// True if a freeform face of 'from' runs just inside the solid 'into'. Only
+// the answer matters, so each face stops sampling as soon as its outcome is
+// certain: when enough points are near, or when the points left can no
+// longer make enough (classifying a point against a solid with hundreds of
+// faces takes milliseconds).
+bool HasNearFace(const SolidInfo& from, const SolidInfo& intoInfo, const TopoDS_Shape& into, double depthLimit)
 {
     std::unique_ptr<BRepClass3d_SolidClassifier> classifier;
     std::vector<std::unique_ptr<BRepExtrema_ExtPF>> distance(intoInfo.faces.size());
-    std::pair<size_t, size_t> best(0, 0);
     for (const FaceInfo& f : from.faces)
     {
         if (!f.freeform || f.box.IsOut(intoInfo.box))
@@ -126,9 +127,15 @@ std::pair<size_t, size_t> NearSamples(const SolidInfo& from, const SolidInfo& in
             continue;
         }
         const std::vector<gp_Pnt> points = SampleFace(f.face);
-        size_t inside = 0;
-        for (const gp_Pnt& p : points)
+        size_t needed = kMinNear;
+        while (needed < kMinNearFraction * points.size())
         {
+            ++needed;
+        }
+        size_t inside = 0;
+        for (size_t i = 0; i < points.size() && inside + (points.size() - i) >= needed; ++i)
+        {
+            const gp_Pnt& p = points[i];
             if (intoInfo.box.IsOut(p))
             {
                 continue;
@@ -164,17 +171,13 @@ std::pair<size_t, size_t> NearSamples(const SolidInfo& from, const SolidInfo& in
                 classifier = std::make_unique<BRepClass3d_SolidClassifier>(into);
             }
             classifier->Perform(p, Precision::Confusion());
-            if (classifier->State() == TopAbs_IN)
+            if (classifier->State() == TopAbs_IN && ++inside >= needed)
             {
-                ++inside;
+                return true;
             }
         }
-        if (inside >= kMinNear && inside >= kMinNearFraction * points.size() && inside > best.first)
-        {
-            best = {inside, points.size()};
-        }
     }
-    return best;
+    return false;
 }
 } // namespace
 
@@ -211,22 +214,25 @@ std::vector<ThreadPair> FindThreadPairs(const std::vector<TopoDS_Shape>& solids,
             if (!info[a].box.IsOut(info[b].box) &&
                 (hasFreeformIn(info[a], info[b]) || hasFreeformIn(info[b], info[a])))
             {
-                candidates.push_back({a, b, 0, 0});
+                candidates.push_back({a, b});
             }
         }
     }
 
+    std::vector<char> found(candidates.size(), 0);
     OSD_Parallel::For(0, static_cast<int>(candidates.size()), [&](int k) {
-        ThreadPair& pair = candidates[k];
-        std::pair<size_t, size_t> ab = NearSamples(info[pair.a], info[pair.b], solids[pair.b], depthLimit);
-        std::pair<size_t, size_t> ba = NearSamples(info[pair.b], info[pair.a], solids[pair.a], depthLimit);
-        const std::pair<size_t, size_t>& best = ab.first >= ba.first ? ab : ba;
-        pair.nearSamples = best.first;
-        pair.samples = best.second;
+        const ThreadPair& pair = candidates[k];
+        found[k] = HasNearFace(info[pair.a], info[pair.b], solids[pair.b], depthLimit) ||
+                   HasNearFace(info[pair.b], info[pair.a], solids[pair.a], depthLimit);
     });
 
     std::vector<ThreadPair> pairs;
-    std::copy_if(candidates.begin(), candidates.end(), std::back_inserter(pairs),
-                 [](const ThreadPair& p) { return p.nearSamples > 0; });
+    for (size_t k = 0; k < candidates.size(); ++k)
+    {
+        if (found[k])
+        {
+            pairs.push_back(candidates[k]);
+        }
+    }
     return pairs;
 }

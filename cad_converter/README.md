@@ -60,6 +60,10 @@ For every model in [`tests/data`](tests/data), the tests:
 - convert it again with the default output (STL, one object per part) into
   an `--output-dir`, and check that the file is there.
 
+Unit tests check the object names (`naming`) and which bodies count as
+watertight solids (`watertight`), and `shells_removed` checks that the open
+sheet in `ShellTest.step` is removed.
+
 Large models aren't committed. Put them in `tests/data/large/` (gitignored):
 they get the `large` label, which the presets skip. Run them with
 `ctest --test-dir build/windows -C Release -L large`.
@@ -87,7 +91,7 @@ printed as `WARNING` lines.
 | `--max-deviation <d>` | Accuracy of the mesh (largest distance from the true surface), in model units. Default: 1/1000 of the model's largest dimension. |
 | `--obj` | Write `model.obj` (Wavefront OBJ, indexed vertices) instead of `model.stl`. |
 | `--output-dir <dir>` | Write the output file into `<dir>` (created if it doesn't exist) instead of next to the input. |
-| `--per-body` | One object per body (`solid_0001`, `shell_0002`, ...) instead of one per part. |
+| `--per-body` | One object per body (`solid_0001`, `solid_0002`, ...) instead of one per part. |
 | `--no-repair` | Skip checking and repairing the CAD geometry. |
 | `--no-collisions` | Don't make the solids conform: overlaps stay and touching meshes aren't flush. |
 | `--full-accuracy-check` | Measure every triangle's deviation (default: a sample of 200k on large models). |
@@ -97,8 +101,18 @@ printed as `WARNING` lines.
 holding all of its placements, since they share a material. Each placement is
 its own closed surface within the object. STL is multi-solid ASCII, with one
 `solid <name> ... endsolid <name>` block per object. OBJ has one `o <name>`
-object per object. Names are the STEP product names with whitespace replaced
-by `_`. Coordinates are written with 17 significant digits, so vertices
+object per object.
+
+Objects are named as follows:
+
+- **Known part name:** the object is named after it, for example
+  `COS-DET-MEC-148_Detector_Indium`.
+- **No name:** objects are numbered in output order: `mesh1`, `mesh2`, ...
+- **Placed more than once:** the number of placements is appended, for
+  example `92196A148_6-32x0.5_SHS_92196A148_instanced12`.
+- **Spaces** become `_`, and a name used twice gets a `_2` suffix.
+
+With `--per-body`, objects are named `solid_0001`, `solid_0002`, ... Coordinates are written with 17 significant digits, so vertices
 shared by touching bodies stay bit-identical.
 
 ## 4. How it works
@@ -107,7 +121,11 @@ The pipeline is in [`src/main.cpp`](src/main.cpp); each stage has its own
 source file, with the reasoning in its header comment.
 
 1. **Read** ([`step_import`](src/step_import.cpp)): the STEP geometry and
-   assembly tree, with every part's name.
+   assembly tree, with every part's name. Only solids are kept: shells and
+   loose faces are removed, because Geant4 and ROOT need every volume to be
+   a watertight solid, and a surface encloses no volume. (In COSI these are
+   the PCB copper layers, exported as zero-thickness faces.) A solid whose
+   shell is still open after repair is removed too, with a `WARNING`.
 2. **Repair** ([`repair`](src/repair.cpp), [`folded_faces`](src/folded_faces.cpp)):
    - each unique part is checked once and repaired if needed;
    - faces the import put on the wrong arc of a torus, sphere or cone are

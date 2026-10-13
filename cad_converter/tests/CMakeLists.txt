@@ -8,6 +8,10 @@
 #   convert_stl.<model>  converts it with the default output (STL, one object
 #                        per part), into an --output-dir;
 #   stl_written.<model>  checks that the STL is in that folder.
+# And "naming" checks the output object names (naming_test.cpp),
+# "watertight" which bodies count as watertight solids (watertight_test.cpp),
+# and "shells_removed" that ShellTest's open sheet (a face lying on the solid,
+# like a PCB copper layer) is removed before conversion.
 # Models over 5 MB are labelled "large" and skipped by the test presets; run
 # them with: ctest --test-dir build/<preset> [-C Release] -L large
 # Large models aren't committed: put them in tests/data/large/ (gitignored).
@@ -18,6 +22,34 @@ if(WIN32)
     set(_check_dlls "$<TARGET_RUNTIME_DLLS:mesh_check>")
     add_custom_command(TARGET mesh_check POST_BUILD
         COMMAND "$<$<BOOL:${_check_dlls}>:${CMAKE_COMMAND};-E;copy_if_different;${_check_dlls};$<TARGET_FILE_DIR:mesh_check>>"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+endif()
+
+# Unit test of the output object names (GroupBodies in export.cpp).
+add_executable(naming_test naming_test.cpp ../src/export.cpp)
+target_include_directories(naming_test PRIVATE ../src)
+target_link_libraries(naming_test PRIVATE TKernel TKMath TKBRep)
+add_test(NAME naming COMMAND naming_test)
+if(WIN32)
+    set(_naming_dlls "$<TARGET_RUNTIME_DLLS:naming_test>")
+    add_custom_command(TARGET naming_test POST_BUILD
+        COMMAND "$<$<BOOL:${_naming_dlls}>:${CMAKE_COMMAND};-E;copy_if_different;${_naming_dlls};$<TARGET_FILE_DIR:naming_test>>"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+endif()
+
+# Unit test of IsWatertight (step_import.cpp).
+add_executable(watertight_test watertight_test.cpp ../src/step_import.cpp)
+target_include_directories(watertight_test PRIVATE ../src)
+target_link_libraries(watertight_test PRIVATE TKernel TKMath TKBRep TKPrim TKXSBase TKDESTEP TKXCAF TKLCAF)
+add_test(NAME watertight COMMAND watertight_test)
+if(WIN32)
+    set(_watertight_dlls "$<TARGET_RUNTIME_DLLS:watertight_test>")
+    add_custom_command(TARGET watertight_test POST_BUILD
+        COMMAND "$<$<BOOL:${_watertight_dlls}>:${CMAKE_COMMAND};-E;copy_if_different;${_watertight_dlls};$<TARGET_FILE_DIR:watertight_test>>"
         COMMAND_EXPAND_LISTS
         VERBATIM
     )
@@ -60,3 +92,11 @@ foreach(_model IN LISTS _models)
             PROPERTIES LABELS large TIMEOUT 7200)
     endif()
 endforeach()
+
+# ShellTest: the sheet is removed, and only the solid is written.
+add_test(NAME shells_removed
+    COMMAND cad_converter --obj --per-body --output-dir "${CMAKE_CURRENT_BINARY_DIR}/shells"
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/ShellTest.step")
+set_tests_properties(shells_removed PROPERTIES
+    PASS_REGULAR_EXPRESSION "removed 1 shell[(]s[)] and 0 loose face[(]s[)][^~]*wrote 1 bodies as 1 object"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING")

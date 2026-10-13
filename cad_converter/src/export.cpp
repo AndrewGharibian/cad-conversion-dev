@@ -1,35 +1,81 @@
 // =============================================================================
 // export.cpp — group the bodies into output objects, and write them.
 //
-// Grouping:
+// Grouping: by default every part becomes one object: all placements of a
+// part (all copies of a screw, say) are written together as one mesh, since
+// they are the same material. Each placement stays its own closed surface
+// inside that mesh. With --per-body, every body is its own object.
 //
-// By default every part becomes one object: all placements of a part (all
-// copies of a screw, say) are written together as one mesh, named after the
-// part, since they are the same material. Each placement stays its own
-// closed surface inside that mesh. A body whose part is unknown is its own
-// object. With --per-body, every body is its own object, named solid_NNNN,
-// shell_NNNN or face_NNNN.
-//
-// Object names have whitespace replaced by '_' (an STL "solid" line and an
-// OBJ "o" line end at the line, and some readers split names at spaces) and
-// get a _2, _3, ... suffix if two different parts end up with the same name.
+// Naming (by default):
+//   - an object is named after its part, if the part's name is known;
+//   - objects without a name are numbered in output order: mesh1, mesh2, ...;
+//   - a part placed more than once gets the number of placements appended:
+//     <name>_instanced<n>. A placement can hold several bodies (a part made
+//     of several solids), so n is the part's bodies in the object divided by
+//     the bodies in one placement.
+// With --per-body, objects are named solid_NNNN.
+// Whitespace in names is replaced by '_' (an STL "solid" line and an OBJ "o"
+// line end at the line, and some readers split names at spaces), and a name
+// used twice gets a _2, _3, ... suffix.
 // =============================================================================
 #include "export.hpp"
 
+#include <OSD_Parallel.hxx>
 #include <gp_Vec.hxx>
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <stdexcept>
 
-std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, bool perBody)
+std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, const std::vector<SurfaceMesh>& meshes,
+                                      bool perBody)
 {
     std::vector<OutputObject> objects;
-    std::map<std::string, size_t> byPart; // part name -> object index
+    std::vector<size_t> bodiesPerInstance; // per object
+    std::map<std::string, size_t> byPart;  // part name -> object index
+    for (size_t i = 0; i < bodies.size(); ++i)
+    {
+        if (meshes[i].triangles.empty())
+        {
+            continue; // dropped: not written, and not an instance
+        }
+        if (perBody || bodies[i].part.empty())
+        {
+            objects.push_back({perBody ? bodies[i].name : std::string(), {i}});
+            bodiesPerInstance.push_back(1);
+            continue;
+        }
+        auto found = byPart.find(bodies[i].part);
+        if (found == byPart.end())
+        {
+            found = byPart.emplace(bodies[i].part, objects.size()).first;
+            objects.push_back({bodies[i].part, {}});
+            bodiesPerInstance.push_back(std::max<size_t>(1, bodies[i].partBodies));
+        }
+        objects[found->second].bodies.push_back(i);
+    }
+
+    size_t unnamed = 0;
     std::map<std::string, int> nameUses;
-    auto addObject = [&](std::string name) {
+    for (size_t k = 0; k < objects.size(); ++k)
+    {
+        std::string& name = objects[k].name;
+        if (!perBody)
+        {
+            if (name.empty())
+            {
+                name = "mesh" + std::to_string(++unnamed);
+            }
+            const size_t instances = (objects[k].bodies.size() + bodiesPerInstance[k] - 1) / bodiesPerInstance[k];
+            if (instances > 1)
+            {
+                name += "_instanced" + std::to_string(instances);
+            }
+        }
         for (char& c : name)
         {
             if (std::isspace(static_cast<unsigned char>(c)))
@@ -42,22 +88,6 @@ std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, bool perB
         {
             name += "_" + std::to_string(uses);
         }
-        objects.push_back({name, {}});
-        return objects.size() - 1;
-    };
-    for (size_t i = 0; i < bodies.size(); ++i)
-    {
-        if (perBody || bodies[i].part.empty())
-        {
-            objects[addObject(bodies[i].name)].bodies.push_back(i);
-            continue;
-        }
-        auto found = byPart.find(bodies[i].part);
-        if (found == byPart.end())
-        {
-            found = byPart.emplace(bodies[i].part, addObject(bodies[i].part)).first;
-        }
-        objects[found->second].bodies.push_back(i);
     }
     return objects;
 }
@@ -75,6 +105,69 @@ std::vector<OutputObject> GroupBodies(const std::vector<Body>& bodies, bool perB
 // digits round-trip a double exactly, so shared vertices stay bit-identical
 // in the file and each body stays watertight for whatever reads it.
 // =============================================================================
+namespace
+{
+// A number as "%.17g" would print it (what an ostream with precision(17)
+// writes), without the ostream's per-number overhead.
+void Append(std::string& out, double value)
+{
+    char buffer[32];
+    const auto end = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general, 17).ptr;
+    out.append(buffer, end);
+}
+
+void Append(std::string& out, size_t value)
+{
+    char buffer[24];
+    const auto end = std::to_chars(buffer, buffer + sizeof(buffer), value).ptr;
+    out.append(buffer, end);
+}
+
+// Writes every non-empty object: its header, the text of each of its bodies
+// ('format', run in parallel on batches of bodies) and its footer, in order.
+void WriteObjects(std::ofstream& out, const std::vector<OutputObject>& objects,
+                  const std::vector<SurfaceMesh>& meshes, const std::function<std::string(const OutputObject&)>& header,
+                  const std::function<std::string(const OutputObject&)>& footer,
+                  const std::function<void(size_t body, std::string& text)>& format)
+{
+    struct Piece
+    {
+        std::string before; // header of the object this body starts
+        size_t body;
+        std::string after; // footer of the object this body ends
+    };
+    std::vector<Piece> pieces;
+    for (const OutputObject& object : objects)
+    {
+        if (std::all_of(object.bodies.begin(), object.bodies.end(),
+                        [&](size_t i) { return meshes[i].triangles.empty(); }))
+        {
+            continue;
+        }
+        for (size_t k = 0; k < object.bodies.size(); ++k)
+        {
+            pieces.push_back({k == 0 ? header(object) : std::string(), object.bodies[k],
+                              k + 1 == object.bodies.size() ? footer(object) : std::string()});
+        }
+    }
+    // Batches keep the memory bounded: only one batch's text is held at once.
+    constexpr size_t kBatch = 64;
+    std::vector<std::string> text(kBatch);
+    for (size_t first = 0; first < pieces.size(); first += kBatch)
+    {
+        const size_t count = std::min(kBatch, pieces.size() - first);
+        OSD_Parallel::For(0, static_cast<int>(count), [&](int k) {
+            text[k].clear();
+            format(pieces[first + k].body, text[k]);
+        });
+        for (size_t k = 0; k < count; ++k)
+        {
+            out << pieces[first + k].before << text[k] << pieces[first + k].after;
+        }
+    }
+}
+} // namespace
+
 void ExportStl(const std::vector<OutputObject>& objects, const std::vector<SurfaceMesh>& meshes,
                const std::string& outputPath)
 {
@@ -83,19 +176,11 @@ void ExportStl(const std::vector<OutputObject>& objects, const std::vector<Surfa
     {
         throw std::runtime_error("Cannot write STL file: " + outputPath);
     }
-    out.precision(17);
-
-    for (const OutputObject& object : objects)
-    {
-        if (std::all_of(object.bodies.begin(), object.bodies.end(),
-                        [&](size_t i) { return meshes[i].triangles.empty(); }))
-        {
-            continue;
-        }
-        out << "solid " << object.name << "\n";
-        for (size_t i : object.bodies)
-        {
-            const SurfaceMesh& mesh = meshes[i];
+    WriteObjects(
+        out, objects, meshes, [](const OutputObject& object) { return "solid " + object.name + "\n"; },
+        [](const OutputObject& object) { return "endsolid " + object.name + "\n"; },
+        [&](size_t body, std::string& text) {
+            const SurfaceMesh& mesh = meshes[body];
             for (const auto& tri : mesh.triangles)
             {
                 const gp_Pnt& a = mesh.vertices[tri[0]];
@@ -106,18 +191,26 @@ void ExportStl(const std::vector<OutputObject>& objects, const std::vector<Surfa
                 {
                     normal.Normalize();
                 }
-                out << "  facet normal " << normal.X() << " " << normal.Y() << " " << normal.Z() << "\n"
-                    << "    outer loop\n";
+                text += "  facet normal ";
+                Append(text, normal.X());
+                text += ' ';
+                Append(text, normal.Y());
+                text += ' ';
+                Append(text, normal.Z());
+                text += "\n    outer loop\n";
                 for (const gp_Pnt* p : {&a, &b, &c})
                 {
-                    out << "      vertex " << p->X() << " " << p->Y() << " " << p->Z() << "\n";
+                    text += "      vertex ";
+                    Append(text, p->X());
+                    text += ' ';
+                    Append(text, p->Y());
+                    text += ' ';
+                    Append(text, p->Z());
+                    text += '\n';
                 }
-                out << "    endloop\n"
-                    << "  endfacet\n";
+                text += "    endloop\n  endfacet\n";
             }
-        }
-        out << "endsolid " << object.name << "\n";
-    }
+        });
 }
 
 // =============================================================================
@@ -142,10 +235,11 @@ void ExportObj(const std::vector<OutputObject>& objects, const std::vector<Surfa
     {
         throw std::runtime_error("Cannot write OBJ file: " + outputPath);
     }
-    out.precision(17);
-
     out << "# " << objects.size() << " objects, written by cad_converter\n";
-    size_t offset = 1; // OBJ vertex numbers start at 1 and run through the whole file
+
+    // OBJ vertex numbers start at 1 and run through the whole file.
+    std::vector<size_t> offset(meshes.size(), 0);
+    size_t next = 1;
     for (const OutputObject& object : objects)
     {
         if (std::all_of(object.bodies.begin(), object.bodies.end(),
@@ -153,19 +247,36 @@ void ExportObj(const std::vector<OutputObject>& objects, const std::vector<Surfa
         {
             continue;
         }
-        out << "o " << object.name << "\n";
         for (size_t i : object.bodies)
         {
-            const SurfaceMesh& mesh = meshes[i];
+            offset[i] = next;
+            next += meshes[i].vertices.size();
+        }
+    }
+    WriteObjects(
+        out, objects, meshes, [](const OutputObject& object) { return "o " + object.name + "\n"; },
+        [](const OutputObject&) { return std::string(); },
+        [&](size_t body, std::string& text) {
+            const SurfaceMesh& mesh = meshes[body];
             for (const gp_Pnt& p : mesh.vertices)
             {
-                out << "v " << p.X() << " " << p.Y() << " " << p.Z() << "\n";
+                text += "v ";
+                Append(text, p.X());
+                text += ' ';
+                Append(text, p.Y());
+                text += ' ';
+                Append(text, p.Z());
+                text += '\n';
             }
             for (const auto& tri : mesh.triangles)
             {
-                out << "f " << tri[0] + offset << " " << tri[1] + offset << " " << tri[2] + offset << "\n";
+                text += "f ";
+                Append(text, tri[0] + offset[body]);
+                text += ' ';
+                Append(text, tri[1] + offset[body]);
+                text += ' ';
+                Append(text, tri[2] + offset[body]);
+                text += '\n';
             }
-            offset += mesh.vertices.size();
-        }
-    }
+        });
 }
