@@ -266,7 +266,8 @@ std::vector<std::array<int, 3>> EarClip(const std::vector<gp_XY>& pts, std::vect
 class FaceTriangulator
 {
 public:
-    FaceTriangulator(const TopoDS_Shape& model, double deflection) : deflection_(deflection)
+    FaceTriangulator(const TopoDS_Shape& model, double deflection, double angle)
+        : deflection_(deflection), angle_(angle)
     {
         TopExp::MapShapesAndAncestors(model, TopAbs_EDGE, TopAbs_FACE, edgeFaces_);
     }
@@ -278,6 +279,7 @@ private:
     const std::vector<gp_Pnt>& EdgePoints(const TopoDS_Edge& edge);
 
     double deflection_;
+    double angle_;
     ShapeAncestorsMap edgeFaces_;
     ShapeIndexMap sampledEdges_;
     std::vector<std::vector<gp_Pnt>> samples_;
@@ -322,7 +324,7 @@ const std::vector<gp_Pnt>& FaceTriangulator::EdgePoints(const TopoDS_Edge& anyEd
         else
         {
             BRepAdaptor_Curve curve(edge);
-            GCPnts_TangentialDeflection sampler(curve, 20.0 * kPi / 180.0, deflection_);
+            GCPnts_TangentialDeflection sampler(curve, angle_, deflection_);
             for (int k = 1; k <= sampler.NbPoints(); ++k)
             {
                 points.push_back(sampler.Value(k));
@@ -530,9 +532,9 @@ bool FaceTriangulator::Triangulate(const TopoDS_Face& originalFace)
 
 } // namespace
 
-int TriangulateUnmeshedFacesFromBoundary(const TopoDS_Shape& model, double deflection)
+int TriangulateUnmeshedFacesFromBoundary(const TopoDS_Shape& model, double deflection, double angle)
 {
-    FaceTriangulator triangulator(model, deflection);
+    FaceTriangulator triangulator(model, deflection, angle);
     ShapeIndexMap done;
     int count = 0;
     for (TopExp_Explorer exp(model, TopAbs_FACE); exp.More(); exp.Next())

@@ -12,17 +12,20 @@
 
 constexpr double kPi = 3.14159265358979323846; // <cmath>'s M_PI isn't standard on MSVC
 
-// Largest angle between neighbouring triangles along a curve, for OCCT's
-// mesher and the structured revolved faces alike.
-constexpr double kMeshAngleDeg = 20.0;
+// Largest angle between neighbouring triangles along a curve (the angular
+// deflection), for OCCT's mesher and the structured revolved faces alike:
+// the default, changed with --angular-deflection. 20 degrees gives a full
+// circle at least 18 segments, however small it is.
+constexpr double kDefaultMeshAngleDeg = 20.0;
 
 // The default accuracy limit: 1/1000 of the shape's largest dimension.
 double DefaultMaxDeviation(const TopoDS_Shape& shape);
 
-// Meshes every face within 'deflection' of the exact surface, retrying the
-// faces the mesher gives up on. Returns the shape that carries the
+// Meshes every face within 'deflection' of the exact surface, with at most
+// 'angle' (radians) between neighbouring triangles along a curve, retrying
+// the faces the mesher gives up on. Returns the shape that carries the
 // triangulation, which may be a rebuilt copy: use it from then on.
-TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection);
+TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection, double angle);
 
 // Number of faces without a triangulation (each would be a hole).
 int CountUnmeshedFaces(const TopoDS_Shape& shape);

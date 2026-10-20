@@ -181,8 +181,15 @@ double Welder::TriangleDeviation(const Triangle& t, ShapeAnalysis_Surface& surfa
     const GeomAbs_SurfaceType type = surface.Adaptor3d()->GetType();
     const bool freeform = type != GeomAbs_Plane && type != GeomAbs_Cylinder && type != GeomAbs_Cone &&
                           type != GeomAbs_Sphere && type != GeomAbs_Torus;
+    // The corners lie on the surface, so a sample's true distance from it is
+    // at most its distance to the nearest corner. A search that ends farther
+    // away has found another part of the surface (the next turn of a
+    // thread, say); the local search then falls back to NextValueOfUV, and
+    // any result is capped at that bound.
     auto sample = [&](const gp_XYZ& point, double wb, double wc) {
         gp_Pnt p(point);
+        const double nearestCorner = std::sqrt(
+            std::min({p.SquareDistance(gp_Pnt(a)), p.SquareDistance(gp_Pnt(b)), p.SquareDistance(gp_Pnt(c))}));
         gp_Pnt2d uv;
         if (t.hasUV)
         {
@@ -191,7 +198,7 @@ double Welder::TriangleDeviation(const Triangle& t, ShapeAnalysis_Surface& surfa
             {
                 Extrema_GenLocateExtPS locate(*surface.Adaptor3d());
                 locate.Perform(p, guess.X(), guess.Y());
-                if (locate.IsDone())
+                if (locate.IsDone() && std::sqrt(locate.SquareDistance()) <= nearestCorner)
                 {
                     worst = std::max(worst, std::sqrt(locate.SquareDistance()));
                     return;
@@ -203,7 +210,7 @@ double Welder::TriangleDeviation(const Triangle& t, ShapeAnalysis_Surface& surfa
         {
             uv = surface.ValueOfUV(p, weldTol_);
         }
-        worst = std::max(worst, p.Distance(surface.Value(uv)));
+        worst = std::max(worst, std::min(nearestCorner, p.Distance(surface.Value(uv))));
     };
 
     constexpr int kSteps = 6;

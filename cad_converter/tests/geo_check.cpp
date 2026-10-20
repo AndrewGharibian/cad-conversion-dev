@@ -16,6 +16,8 @@
 //     or repeated-index triangle, after welding identical vertices every edge
 //     used exactly twice in opposite directions, positive enclosed volume,
 //     extent in all three dimensions;
+//   - no facet that ROOT's TGeoTessellated::FacetCheck reports as degenerate
+//     or of zero surface area (under 1e-10 cm^2);
 //   - the surrounding sphere encloses every vertex, and the world box the
 //     sphere.
 // Includes starting with $(MEGALIB) (the material list) are skipped.
@@ -201,6 +203,25 @@ bool CheckMesh(std::vector<Vertex> vertices, std::vector<Facet> facets, std::str
             auto& entry = edges[{std::min(from, to), std::max(from, to)}];
             ++entry.first;
             entry.second += from < to ? 1 : -1;
+        }
+    }
+    // ROOT's TGeoTessellated::FacetCheck (lengths in cm): a facet whose edge
+    // cross product has a squared magnitude under 1e-20 is "degenerated", one
+    // under 1e-10 cm^2 "has zero surface area".
+    for (const Facet& f : facets)
+    {
+        const Vertex& a = vertices[f[0]];
+        const Vertex& b = vertices[f[1]];
+        const Vertex& c = vertices[f[2]];
+        const double e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        const double e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        const double cross[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                 e1[0] * e2[1] - e1[1] * e2[0]};
+        const double mag2 = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
+        if (mag2 < 1.0e-20 || 0.5 * std::sqrt(mag2) < 1.0e-10)
+        {
+            error = "a facet ROOT reports as degenerate or of zero surface area (under 1e-10 cm^2)";
+            return false;
         }
     }
     for (const auto& entry : edges)

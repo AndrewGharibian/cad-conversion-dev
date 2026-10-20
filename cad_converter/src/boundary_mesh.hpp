@@ -9,5 +9,7 @@
 // For every face of 'model' that still has no triangulation, builds one
 // from the face's boundary alone: the points the neighbouring faces' meshes
 // already placed on the shared edges (so the result stays flush with them),
-// triangulated by ear clipping. Returns the number of faces triangulated.
-int TriangulateUnmeshedFacesFromBoundary(const TopoDS_Shape& model, double deflection);
+// triangulated by ear clipping. Edges no neighbour has sampled are sampled
+// within 'deflection' and 'angle' (radians). Returns the number of faces
+// triangulated.
+int TriangulateUnmeshedFacesFromBoundary(const TopoDS_Shape& model, double deflection, double angle);

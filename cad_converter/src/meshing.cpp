@@ -11,6 +11,7 @@
 #include <BRepGProp.hxx>
 #include <BRepLib.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -137,14 +138,23 @@ static TopoDS_Shape SplitClosedFaces(const TopoDS_Shape& shape)
 // limit keeps the measured result under it.
 constexpr double kOcctDeflectionMargin = 0.9;
 
-static void MeshShape(const TopoDS_Shape& shape, double deflection)
+static void MeshShape(const TopoDS_Shape& shape, double deflection, double angle)
 {
-    // Constructing BRepMesh_IncrementalMesh with these arguments runs the
-    // meshing algorithm immediately (no separate .Perform() call needed).
-    // isInParallel: mesh faces on all CPU cores (OSD_Parallel). Each face is
-    // triangulated independently, so this is safe and scales with core count.
-    BRepMesh_IncrementalMesh mesher(shape, kOcctDeflectionMargin * deflection, /*isRelative=*/false,
-                                    kMeshAngleDeg * kPi / 180.0, /*isInParallel=*/true);
+    // The angle applies to the edges (circles get fewer points with a larger
+    // one). Inside a face OCCT uses twice the edge angle by default; that is
+    // capped at what the default angle gives, since inside generic curved
+    // faces OCCT relies on the angle as well as the deflection.
+    IMeshTools_Parameters parameters;
+    parameters.Deflection = kOcctDeflectionMargin * deflection;
+    parameters.DeflectionInterior = parameters.Deflection;
+    parameters.Angle = angle;
+    parameters.AngleInterior = 2.0 * std::min(angle, kDefaultMeshAngleDeg * kPi / 180.0);
+    parameters.Relative = false;
+    // Mesh faces on all CPU cores (OSD_Parallel). Each face is triangulated
+    // independently, so this is safe and scales with core count.
+    parameters.InParallel = true;
+    // Constructing the mesher runs it immediately (no separate Perform()).
+    BRepMesh_IncrementalMesh mesher(shape, parameters);
 }
 
 // Number of faces the mesher gave up on (BRep_Tool::Triangulation is null).
@@ -169,7 +179,7 @@ int CountUnmeshedFaces(const TopoDS_Shape& shape)
 // retries hand it just the faces that still need a mesh. Their boundary
 // edges keep the discretization their meshed neighbours already gave them,
 // so the new triangles still line up with the neighbours.
-static void MeshUnmeshedFaces(const TopoDS_Shape& shape, double deflection)
+static void MeshUnmeshedFaces(const TopoDS_Shape& shape, double deflection, double angle)
 {
     BRep_Builder builder;
     TopoDS_Compound pending;
@@ -186,7 +196,7 @@ static void MeshUnmeshedFaces(const TopoDS_Shape& shape, double deflection)
     }
     if (any)
     {
-        MeshShape(pending, deflection);
+        MeshShape(pending, deflection, angle);
     }
 }
 
@@ -198,9 +208,9 @@ static void MeshUnmeshedFaces(const TopoDS_Shape& shape, double deflection)
 // which may be a rebuilt version, so later steps (stats, export, collisions)
 // must use the returned shape.
 // =============================================================================
-TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection)
+TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection, double angle)
 {
-    MeshShape(shape, deflection);
+    MeshShape(shape, deflection, angle);
     int unmeshed = CountUnmeshedFaces(shape);
     if (unmeshed == 0)
     {
@@ -217,7 +227,7 @@ TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection)
     for (int attempt = 1; attempt <= 8; ++attempt)
     {
         candidate = RestartWiresOfUnmeshedFaces(candidate);
-        MeshUnmeshedFaces(candidate, deflection);
+        MeshUnmeshedFaces(candidate, deflection, angle);
         const int left = CountUnmeshedFaces(candidate);
         if (left < bestUnmeshed)
         {
@@ -242,7 +252,7 @@ TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection)
     {
         std::cout << "  still failing; splitting closed faces and retrying\n";
         TopoDS_Shape split = SplitClosedFaces(best);
-        MeshUnmeshedFaces(split, deflection);
+        MeshUnmeshedFaces(split, deflection, angle);
         if (CountUnmeshedFaces(split) < bestUnmeshed)
         {
             return split;
@@ -251,7 +261,7 @@ TopoDS_Shape MeshWithFallback(const TopoDS_Shape& shape, double deflection)
     // Very last resort: build these faces' triangles from their boundary alone
     // (boundary_mesh.cpp), reusing the points the neighbours' meshes put on the
     // shared edges so everything stays flush.
-    const int fromBoundary = TriangulateUnmeshedFacesFromBoundary(best, deflection);
+    const int fromBoundary = TriangulateUnmeshedFacesFromBoundary(best, deflection, angle);
     std::cout << "  triangulated " << fromBoundary << " of " << bestUnmeshed
               << " remaining face(s) from their boundary alone\n";
     return best;

@@ -54,6 +54,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 
@@ -125,6 +126,17 @@ struct Box
             lo[k] = std::min(lo[k], p.Coord(k + 1));
             hi[k] = std::max(hi[k], p.Coord(k + 1));
         }
+    }
+    bool Near(const gp_Pnt& p, double reach) const
+    {
+        for (int k = 0; k < 3; ++k)
+        {
+            if (p.Coord(k + 1) < lo[k] - reach || p.Coord(k + 1) > hi[k] + reach)
+            {
+                return false;
+            }
+        }
+        return true;
     }
     bool Overlaps(const Box& other) const
     {
@@ -474,26 +486,37 @@ void CountEdgeDefects(const SurfaceMesh& mesh, size_t& openEdges, size_t& nonMan
     }
 }
 
-size_t FlipDegenerateTriangles(SurfaceMesh& mesh, double minHeight, size_t& remaining)
+size_t FlipDegenerateTriangles(SurfaceMesh& mesh, double minHeight, double minArea, size_t& remaining)
 {
     auto& tris = mesh.triangles;
     // The sliver's longest edge, as k (the edge tri[k] -> tri[k + 1]), or -1
-    // if the triangle isn't a sliver.
+    // if the triangle isn't a sliver: lower than minHeight, or smaller than
+    // minArea with its height under kCapFraction of its shortest edge (a
+    // vertex just off the opposite edge; a tiny triangle with a short edge is
+    // left to CollapseTinyTriangles).
+    constexpr double kCapFraction = 0.01;
     auto sliverEdge = [&](const std::array<int, 3>& tri) {
         const gp_Pnt* p[3] = {&mesh.vertices[tri[0]], &mesh.vertices[tri[1]], &mesh.vertices[tri[2]]};
-        double longest = 0.0;
+        double longest = 0.0, shortest = std::numeric_limits<double>::max();
         int edge = -1;
         for (int k = 0; k < 3; ++k)
         {
             const double length = p[k]->SquareDistance(*p[(k + 1) % 3]);
+            shortest = std::min(shortest, length);
             if (length > longest)
             {
                 longest = length;
                 edge = k;
             }
         }
+        if (edge < 0)
+        {
+            return -1;
+        }
         const double twiceArea = gp_Vec(*p[0], *p[1]).Crossed(gp_Vec(*p[0], *p[2])).Magnitude();
-        return edge >= 0 && twiceArea < minHeight * std::sqrt(longest) ? edge : -1;
+        const double height = twiceArea / std::sqrt(longest);
+        const bool cap = 0.5 * twiceArea < minArea && height < kCapFraction * std::sqrt(shortest);
+        return height < minHeight || cap ? edge : -1;
     };
     remaining = 0;
     if (std::none_of(tris.begin(), tris.end(), [&](const std::array<int, 3>& tri) { return sliverEdge(tri) >= 0; }))
@@ -568,4 +591,349 @@ size_t FlipDegenerateTriangles(SurfaceMesh& mesh, double minHeight, size_t& rema
     remaining = static_cast<size_t>(
         std::count_if(tris.begin(), tris.end(), [&](const std::array<int, 3>& tri) { return sliverEdge(tri) >= 0; }));
     return flips;
+}
+
+namespace
+{
+using PointKey = std::array<double, 3>;
+
+PointKey KeyOf(const gp_Pnt& p)
+{
+    return {p.X(), p.Y(), p.Z()};
+}
+
+double TriangleArea(const SurfaceMesh& mesh, const std::array<int, 3>& tri)
+{
+    const gp_Pnt& a = mesh.vertices[tri[0]];
+    return 0.5 * gp_Vec(a, mesh.vertices[tri[1]]).Crossed(gp_Vec(a, mesh.vertices[tri[2]])).Magnitude();
+}
+
+// True if every directed edge is used exactly once and its reverse too: a
+// closed, consistently oriented surface without doubled triangles.
+bool IsClosedOriented(const SurfaceMesh& mesh)
+{
+    std::unordered_map<uint64_t, int> uses;
+    uses.reserve(3 * mesh.triangles.size());
+    auto key = [](int a, int b) {
+        return static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32 | static_cast<uint32_t>(b);
+    };
+    for (const auto& tri : mesh.triangles)
+    {
+        for (int k = 0; k < 3; ++k)
+        {
+            if (++uses[key(tri[k], tri[(k + 1) % 3])] > 1)
+            {
+                return false;
+            }
+        }
+    }
+    for (const auto& entry : uses)
+    {
+        const int a = static_cast<int>(entry.first >> 32), b = static_cast<int>(entry.first & 0xffffffffu);
+        if (!uses.count(key(b, a)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True if a triangle's bounding box comes within 'reach' of 'point'.
+bool HasTriangleNear(const SurfaceMesh& mesh, const gp_Pnt& point, double reach)
+{
+    for (const auto& tri : mesh.triangles)
+    {
+        bool inReach = true;
+        for (int k = 1; k <= 3 && inReach; ++k)
+        {
+            const double a = mesh.vertices[tri[0]].Coord(k), b = mesh.vertices[tri[1]].Coord(k),
+                         c = mesh.vertices[tri[2]].Coord(k);
+            inReach = point.Coord(k) >= std::min({a, b, c}) - reach && point.Coord(k) <= std::max({a, b, c}) + reach;
+        }
+        if (inReach)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Moves the vertices 'from' (all at one point) of 'mesh' to 'to': merged into
+// the vertex already there, if any, or moved. The triangles that collapse
+// are dropped, and unused vertices removed. Returns false, leaving 'mesh'
+// as it was, if the result isn't a closed, oriented surface or a remaining
+// triangle around the point would turn over.
+bool MovePoint(SurfaceMesh& mesh, const std::vector<int>& from, const gp_Pnt& to)
+{
+    SurfaceMesh result = mesh;
+    int target = -1;
+    for (int v = 0; v < static_cast<int>(result.vertices.size()); ++v)
+    {
+        if (KeyOf(result.vertices[v]) == KeyOf(to))
+        {
+            target = v;
+            break;
+        }
+    }
+    if (target < 0)
+    {
+        target = from.front();
+        result.vertices[target] = to;
+    }
+    auto moved = [&](int v) { return std::find(from.begin(), from.end(), v) != from.end(); };
+    std::vector<std::array<int, 3>> triangles;
+    for (const auto& tri : mesh.triangles)
+    {
+        std::array<int, 3> next = tri;
+        bool touches = false;
+        for (int& v : next)
+        {
+            if (moved(v))
+            {
+                v = target;
+                touches = true;
+            }
+        }
+        if (next[0] == next[1] || next[1] == next[2] || next[2] == next[0])
+        {
+            continue; // collapsed
+        }
+        if (touches)
+        {
+            const gp_Pnt& a = mesh.vertices[tri[0]];
+            const gp_Vec before = gp_Vec(a, mesh.vertices[tri[1]]).Crossed(gp_Vec(a, mesh.vertices[tri[2]]));
+            const gp_Pnt& b = result.vertices[next[0]];
+            const gp_Vec after =
+                gp_Vec(b, result.vertices[next[1]]).Crossed(gp_Vec(b, result.vertices[next[2]]));
+            if (before.Dot(after) <= 0.0)
+            {
+                return false; // turned over, or became flat
+            }
+        }
+        triangles.push_back(next);
+    }
+    result.triangles = std::move(triangles);
+    if (result.triangles.size() < 4 || !IsClosedOriented(result))
+    {
+        return false;
+    }
+    // Drop the vertices no triangle uses any more.
+    std::vector<int> index(result.vertices.size(), -1);
+    std::vector<gp_Pnt> vertices;
+    for (auto& tri : result.triangles)
+    {
+        for (int& v : tri)
+        {
+            if (index[v] < 0)
+            {
+                index[v] = static_cast<int>(vertices.size());
+                vertices.push_back(result.vertices[v]);
+            }
+            v = index[v];
+        }
+    }
+    result.vertices = std::move(vertices);
+    mesh = std::move(result);
+    return true;
+}
+} // namespace
+
+size_t CollapseTinyTriangles(std::vector<SurfaceMesh>& meshes, double minArea, double maxMove, bool keepApart,
+                             size_t& remaining)
+{
+    // For keepApart: each body's box, and its mesh as a Manifold (built when
+    // first needed, dropped when the mesh changes).
+    std::vector<Box> boxes(meshes.size());
+    std::vector<std::unique_ptr<manifold::Manifold>> solids(meshes.size());
+    auto boxOf = [&](size_t i) {
+        boxes[i] = Box();
+        for (const gp_Pnt& p : meshes[i].vertices)
+        {
+            boxes[i].Add(p);
+        }
+    };
+    if (keepApart)
+    {
+        for (size_t i = 0; i < meshes.size(); ++i)
+        {
+            boxOf(i);
+        }
+    }
+    auto solidOf = [&](size_t i) -> const manifold::Manifold& {
+        if (!solids[i])
+        {
+            solids[i] = std::make_unique<manifold::Manifold>(
+                ToManifoldMesh(meshes[i], manifold::Manifold::ReserveIDs(1)));
+        }
+        return *solids[i];
+    };
+    // A collapse moves a point by up to 'reach'. A body that has no vertex
+    // there but whose face passes nearby can end up overlapping the moved
+    // surface by a hair, so every changed mesh is tested against every body
+    // within reach of the point; the collapse is made only if none overlaps.
+    auto staysApart = [&](const std::vector<std::pair<size_t, SurfaceMesh>>& changed, const gp_Pnt& point,
+                          double reach) {
+        std::map<size_t, manifold::Manifold> after;
+        for (const auto& [i, mesh] : changed)
+        {
+            after.emplace(i, manifold::Manifold(ToManifoldMesh(mesh, manifold::Manifold::ReserveIDs(1))));
+            if (after.at(i).Status() != manifold::Manifold::Error::NoError)
+            {
+                return false;
+            }
+        }
+        // The pairs to test, and the unchanged bodies' Manifolds built first,
+        // so the tests below only read them, in parallel.
+        std::vector<std::pair<size_t, size_t>> pairs;
+        for (const auto& entry : after)
+        {
+            for (size_t j = 0; j < meshes.size(); ++j)
+            {
+                if (j != entry.first && !meshes[j].triangles.empty() && boxes[j].Near(point, reach) &&
+                    HasTriangleNear(meshes[j], point, reach))
+                {
+                    pairs.emplace_back(entry.first, j);
+                    if (!after.count(j))
+                    {
+                        solidOf(j);
+                    }
+                }
+            }
+        }
+        std::vector<char> apart(pairs.size(), 1);
+        OSD_Parallel::For(0, static_cast<int>(pairs.size()), [&](int k) {
+            const manifold::Manifold& solid = after.at(pairs[k].first);
+            const auto changedJ = after.find(pairs[k].second);
+            const manifold::Manifold& other = changedJ != after.end() ? changedJ->second : *solids[pairs[k].second];
+            apart[k] = other.Status() == manifold::Manifold::Error::NoError &&
+                       (solid ^ other).Volume() <= kMinOverlapFraction * std::min(solid.Volume(), other.Volume());
+        });
+        return std::all_of(apart.begin(), apart.end(), [](char a) { return a != 0; });
+    };
+
+    // Moves tried and rejected (not tried again).
+    std::set<std::pair<PointKey, PointKey>> rejected;
+    size_t collapsed = 0;
+    for (int pass = 0; pass < 32; ++pass)
+    {
+        // The ways to remove each tiny triangle: collapsing one of its edges
+        // no longer than maxMove, either end onto the other, as moves
+        // (from, to). Shortest edges first; the same move found in several
+        // bodies (a shared edge) is one move.
+        std::map<std::pair<PointKey, PointKey>, double> options;
+        for (const SurfaceMesh& mesh : meshes)
+        {
+            for (const auto& tri : mesh.triangles)
+            {
+                if (TriangleArea(mesh, tri) >= minArea)
+                {
+                    continue;
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    const gp_Pnt& a = mesh.vertices[tri[k]];
+                    const gp_Pnt& b = mesh.vertices[tri[(k + 1) % 3]];
+                    const double length = a.Distance(b);
+                    if (length <= maxMove)
+                    {
+                        options[{KeyOf(a), KeyOf(b)}] = length;
+                        options[{KeyOf(b), KeyOf(a)}] = length;
+                    }
+                }
+            }
+        }
+        std::vector<std::pair<double, std::pair<PointKey, PointKey>>> candidates;
+        for (const auto& [move, length] : options)
+        {
+            if (!rejected.count(move))
+            {
+                candidates.emplace_back(length, move);
+            }
+        }
+        std::sort(candidates.begin(), candidates.end());
+        if (candidates.empty())
+        {
+            break;
+        }
+
+        // A move touches two points; after it, the triangles around them have
+        // changed, so each point is moved or kept at most once per pass. (Every
+        // option for a tiny triangle involves two of its corners, so once one
+        // removes it, the others are skipped.)
+        std::set<PointKey> touched;
+        size_t done = 0;
+        for (const auto& candidate : candidates)
+        {
+            const auto& [from, to] = candidate.second;
+            if (touched.count(from) || touched.count(to))
+            {
+                continue;
+            }
+            // Every body with a vertex at the moving point moves it too, so
+            // touching bodies stay flush.
+            std::vector<std::pair<size_t, SurfaceMesh>> results;
+            bool ok = true;
+            for (size_t i = 0; i < meshes.size() && ok; ++i)
+            {
+                std::vector<int> vertices;
+                for (int v = 0; v < static_cast<int>(meshes[i].vertices.size()); ++v)
+                {
+                    if (KeyOf(meshes[i].vertices[v]) == from)
+                    {
+                        vertices.push_back(v);
+                    }
+                }
+                if (vertices.empty())
+                {
+                    continue;
+                }
+                SurfaceMesh mesh = meshes[i];
+                ok = MovePoint(mesh, vertices, gp_Pnt(to[0], to[1], to[2]));
+                results.emplace_back(i, std::move(mesh));
+            }
+            if (results.empty())
+            {
+                continue; // the point is gone
+            }
+            const gp_Pnt point(to[0], to[1], to[2]);
+            if (!ok || results.empty() ||
+                (keepApart && !staysApart(results, point, 2.0 * point.Distance(gp_Pnt(from[0], from[1], from[2])))))
+            {
+                rejected.insert(candidate.second);
+                continue;
+            }
+            for (auto& [i, mesh] : results)
+            {
+                meshes[i] = std::move(mesh);
+                if (keepApart)
+                {
+                    boxOf(i);
+                    solids[i].reset();
+                }
+            }
+            touched.insert(from);
+            touched.insert(to);
+            ++collapsed;
+            ++done;
+        }
+        if (done == 0)
+        {
+            break;
+        }
+    }
+    remaining = CountTinyTriangles(meshes, minArea);
+    return collapsed;
+}
+
+size_t CountTinyTriangles(const std::vector<SurfaceMesh>& meshes, double minArea)
+{
+    size_t count = 0;
+    for (const SurfaceMesh& mesh : meshes)
+    {
+        for (const auto& tri : mesh.triangles)
+        {
+            count += TriangleArea(mesh, tri) < minArea ? 1 : 0;
+        }
+    }
+    return count;
 }

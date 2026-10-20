@@ -5,8 +5,8 @@
 #   check.<model>        checks that OBJ independently (mesh_check: every
 #                        solid closed and consistently oriented, no two
 #                        solids overlapping);
-#   convert_stl.<model>  converts it with the default output (STL, one object
-#                        per part), into an --output-dir;
+#   convert_stl.<model>  converts it to STL (one object per part), into an
+#                        --output-dir;
 #   stl_written.<model>  checks that the STL is in that folder;
 #   convert_geo.<model>  converts it to a Geomega geometry (--geo);
 #   geo_check.<model>    checks that geometry the way MEGAlib reads it
@@ -14,8 +14,9 @@
 #                        MDShapeTessellated's own mesh check).
 # And "naming" checks the output object names (naming_test.cpp),
 # "watertight" which bodies count as watertight solids (watertight_test.cpp),
-# and "shells_removed" that ShellTest's open sheet (a face lying on the solid,
-# like a PCB copper layer) is removed before conversion.
+# "shells_removed" that ShellTest's open sheet (a face lying on the solid,
+# like a PCB copper layer) is removed before conversion, and "min_volume" and
+# "angular_deflection" the simplification options.
 # Models over 5 MB are labelled "large" and skipped by the test presets; run
 # them with: ctest --test-dir build/<preset> [-C Release] -L large
 # Large models aren't committed: put them in tests/data/large/ (gitignored).
@@ -82,7 +83,7 @@ foreach(_model IN LISTS _models)
     add_test(NAME check.${_name}
         COMMAND mesh_check "${_obj_dir}/${_name}.obj")
     add_test(NAME convert_stl.${_name}
-        COMMAND cad_converter --output-dir "${_stl_dir}/out" "${_stl_dir}/${_name}.step")
+        COMMAND cad_converter --stl --output-dir "${_stl_dir}/out" "${_stl_dir}/${_name}.step")
     add_test(NAME stl_written.${_name}
         COMMAND ${CMAKE_COMMAND} -E md5sum "${_stl_dir}/out/${_name}.stl")
     add_test(NAME convert_geo.${_name}
@@ -114,3 +115,40 @@ add_test(NAME shells_removed
 set_tests_properties(shells_removed PROPERTIES
     PASS_REGULAR_EXPRESSION "removed 1 shell[(]s[)] and 0 loose face[(]s[)][^~]*wrote 1 bodies as 1 object"
     FAIL_REGULAR_EXPRESSION "ERROR;WARNING")
+
+# --min-volume: AssemblyTest's PartialRevolve (15396 mm^3) is removed before
+# the fuse, FilletRectTest (62840 mm^3) is kept.
+add_test(NAME min_volume
+    COMMAND cad_converter --obj --per-body --min-volume 20000 --output-dir "${CMAKE_CURRENT_BINARY_DIR}/min_volume"
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/AssemblyTest.step")
+set_tests_properties(min_volume PROPERTIES
+    PASS_REGULAR_EXPRESSION "removed 1 solid[(]s[)] smaller than 20000[^~]*PartialRevolve[^~]*wrote 1 bodies as 1 object"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING")
+
+# --angular-deflection: with a coarse accuracy limit, a 90 degree angle gives
+# ConeTest's circles 4 segments, and the result is still a valid geometry.
+add_test(NAME angular_deflection
+    COMMAND cad_converter --geo --max-deviation 5 --angular-deflection 90
+            --output-dir "${CMAKE_CURRENT_BINARY_DIR}/angular_deflection" "${CMAKE_CURRENT_SOURCE_DIR}/data/ConeTest.step")
+set_tests_properties(angular_deflection PROPERTIES
+    PASS_REGULAR_EXPRESSION "mesh: 9 vertices, 14 triangles"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING"
+    FIXTURES_SETUP angular_deflection)
+add_test(NAME angular_deflection_geo_check
+    COMMAND geo_check "${CMAKE_CURRENT_BINARY_DIR}/angular_deflection/ConeTest.geo.setup")
+set_tests_properties(angular_deflection_geo_check PROPERTIES FIXTURES_REQUIRED angular_deflection)
+
+# Output formats: no format flag gives OBJ only; --stl --geo gives both of
+# those and no OBJ. (The "wrote" lines name every file written.)
+add_test(NAME formats_default
+    COMMAND cad_converter --output-dir "${CMAKE_CURRENT_BINARY_DIR}/formats_default"
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/AssemblyTest.step")
+set_tests_properties(formats_default PROPERTIES
+    PASS_REGULAR_EXPRESSION "wrote [^\n]*AssemblyTest[.]obj"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING;[.]stl;[.]geo[.]setup")
+add_test(NAME formats_stl_geo
+    COMMAND cad_converter --stl --geo --output-dir "${CMAKE_CURRENT_BINARY_DIR}/formats_stl_geo"
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/AssemblyTest.step")
+set_tests_properties(formats_stl_geo PROPERTIES
+    PASS_REGULAR_EXPRESSION "wrote [^\n]*AssemblyTest[.]stl[^~]*included by [^\n]*AssemblyTest[.]geo[.]setup"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING;[.]obj")

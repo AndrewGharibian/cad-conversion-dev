@@ -6,11 +6,21 @@
 //
 //   --max-deviation <d>   accuracy of the output mesh, in model units
 //                         (default: 1/1000 of the model's largest dimension)
-//   --obj                 write model.obj (Wavefront OBJ) instead of model.stl
-//   --geo                 write a MEGAlib/Geomega geometry instead of model.stl:
-//                         model.geo.setup, including one .geo file per object
-//                         (in model_geo/) with a TESSELLATED volume per body
-//   --output-dir <dir>    write the output file into <dir> (created if
+//   --angular-deflection <deg>
+//                         largest angle between neighbouring triangles along
+//                         a curve (default 20: a circle gets at least 18
+//                         segments). Larger values give small round features
+//                         fewer segments; --max-deviation still holds.
+//   --min-volume <v>      remove every solid smaller than <v> (model units
+//                         cubed, e.g. mm^3) before anything else is done
+//   --obj                 write model.obj (Wavefront OBJ, indexed vertices)
+//   --stl                 write model.stl (multi-solid ASCII STL)
+//   --geo                 write a MEGAlib/Geomega geometry: model.geo.setup,
+//                         including one .geo file per object (in model_geo/)
+//                         with a TESSELLATED volume per body
+//                         Any combination of --obj, --stl and --geo can be
+//                         given; with none, the output is model.obj.
+//   --output-dir <dir>    write the output files into <dir> (created if
 //                         missing) instead of next to the input
 //   --per-body            write every body as its own object (solid_NNNN, ...),
 //                         instead of one object per part (all its placements)
@@ -45,8 +55,8 @@
 //   5. Cut every remaining overlap between solid meshes (mesh_cut.cpp), and
 //      check every solid's mesh is closed; a defective fused solid sends its
 //      neighbourhood back to step 3.
-//   6. Write one named mesh per part (or per body) to one STL or OBJ file,
-//      next to the input or in --output-dir (export.cpp), or a Geomega
+//   6. Write one named mesh per part (or per body) to an OBJ and/or STL file,
+//      next to the input or in --output-dir (export.cpp), and/or a Geomega
 //      geometry (geomega_export.cpp).
 //
 // Every stage prints its name when it starts and its duration when it ends.
@@ -66,7 +76,9 @@
 #include "step_import.hpp"
 #include "weld.hpp"
 
+#include <BRepGProp.hxx>
 #include <BRepLib.hxx>
+#include <GProp_GProps.hxx>
 #include <BRep_Builder.hxx>
 #include <OSD_Parallel.hxx>
 #include <BinTools.hxx>
@@ -100,12 +112,22 @@ constexpr size_t kDeviationSampleLimit = 200000;
 // A triangle lower than this fraction of the accuracy limit is a sliver
 // (zero area, see CutAndCount).
 constexpr double kSliverFraction = 1.0e-9;
+// Triangles smaller than this (mm^2) are collapsed: ROOT's TGeoTessellated
+// reports a facet under 1e-10 cm^2 (1e-8 mm^2) as degenerate or of zero
+// surface area; this keeps a factor 10 margin. Collapsing moves a point by
+// at most kMaxCollapseFraction of the accuracy limit.
+constexpr double kMinTriangleArea = 1.0e-7;
+constexpr double kMaxCollapseFraction = 0.01;
 
 struct Options
 {
     std::string input;
     double maxDeviation = 0.0; // 0 = the model's default
+    double meshAngleDeg = kDefaultMeshAngleDeg;
+    double minVolume = 0.0; // 0 = keep every solid
+    // Output formats: any combination; none given means OBJ.
     bool writeObj = false;
+    bool writeStl = false;
     bool writeGeo = false;
     bool perBody = false;
     bool repair = true;
@@ -129,6 +151,10 @@ bool ParseArguments(int argc, char** argv, Options& options)
         {
             options.writeObj = true;
         }
+        else if (arg == "--stl")
+        {
+            options.writeStl = true;
+        }
         else if (arg == "--geo")
         {
             options.writeGeo = true;
@@ -144,6 +170,24 @@ bool ParseArguments(int argc, char** argv, Options& options)
         else if (arg == "--no-collisions")
         {
             options.collisions = false;
+        }
+        else if (arg == "--angular-deflection" && i + 1 < argc)
+        {
+            options.meshAngleDeg = std::stod(argv[++i]);
+            if (!(options.meshAngleDeg > 0.0 && options.meshAngleDeg <= 180.0))
+            {
+                std::cerr << "--angular-deflection must be between 0 and 180 degrees\n";
+                return false;
+            }
+        }
+        else if (arg == "--min-volume" && i + 1 < argc)
+        {
+            options.minVolume = std::stod(argv[++i]);
+            if (!(options.minVolume >= 0.0))
+            {
+                std::cerr << "--min-volume must not be negative\n";
+                return false;
+            }
         }
         else if (arg == "--full-accuracy-check")
         {
@@ -167,12 +211,67 @@ bool ParseArguments(int argc, char** argv, Options& options)
             inputs.push_back(arg);
         }
     }
-    if (inputs.size() != 1 || (options.writeObj && options.writeGeo))
+    if (inputs.size() != 1)
     {
         return false;
     }
+    if (!options.writeObj && !options.writeStl && !options.writeGeo)
+    {
+        options.writeObj = true;
+    }
     options.input = inputs.front();
     return true;
+}
+
+// Removes every solid smaller than 'minVolume' (--min-volume), to simplify
+// the model: screws, washers, small electronics. This happens before the
+// fuse, so a removed solid takes nothing from its neighbours (the fuse gives
+// an overlap to the smaller solid; removed afterwards, it would leave a
+// void). The bodies are numbered again, solid_0001, ... in order.
+void RemoveSmallSolids(std::vector<Body>& bodies, double minVolume)
+{
+    if (minVolume <= 0.0)
+    {
+        return;
+    }
+    std::vector<double> volume(bodies.size(), 0.0);
+    OSD_Parallel::For(0, static_cast<int>(bodies.size()), [&](int i) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(bodies[i].shape, props);
+        volume[i] = std::fabs(props.Mass());
+    });
+    std::vector<Body> kept;
+    std::map<std::string, size_t> removedParts; // part (or body) name -> placements removed
+    double removedVolume = 0.0;
+    for (size_t i = 0; i < bodies.size(); ++i)
+    {
+        if (volume[i] >= minVolume)
+        {
+            kept.push_back(std::move(bodies[i]));
+        }
+        else
+        {
+            ++removedParts[bodies[i].part.empty() ? bodies[i].name : bodies[i].part];
+            removedVolume += volume[i];
+        }
+    }
+    const size_t removed = bodies.size() - kept.size();
+    std::cout << "  removed " << removed << " solid(s) smaller than " << minVolume << " (--min-volume), "
+              << removedVolume << " in all";
+    size_t shown = 0;
+    for (const auto& [name, count] : removedParts)
+    {
+        if (shown++ < 10)
+        {
+            std::cout << (shown == 1 ? ": " : ", ") << name << (count > 1 ? " x" + std::to_string(count) : "");
+        }
+    }
+    std::cout << (removedParts.size() > 10 ? ", ..." : "") << "\n";
+    for (size_t i = 0; i < kept.size(); ++i)
+    {
+        kept[i].name = SolidName(i);
+    }
+    bodies = std::move(kept);
 }
 
 // Removes every body that isn't a watertight solid (IsWatertight), and
@@ -254,10 +353,12 @@ std::vector<Body> ReadAndPrepare(const Options& options, double& maxDeviation, F
         }
     }
     RemoveOpenSolids(bodies);
+    RemoveSmallSolids(bodies, options.minVolume);
     std::cout << "  " << bodies.size() << " bodies\n";
     if (bodies.empty())
     {
-        throw std::runtime_error("The model has no watertight solids: " + options.input);
+        throw std::runtime_error("No solids left to convert (watertight, and at least --min-volume): " +
+                                 options.input);
     }
 
     // The accuracy limit drives every meshing step.
@@ -283,6 +384,11 @@ std::vector<Body> ReadAndPrepare(const Options& options, double& maxDeviation, F
 std::vector<Body> LoadSavedModel(const Options& options, double& maxDeviation)
 {
     StageTimer timer("reading saved model");
+    if (options.minVolume > 0.0)
+    {
+        std::cout << "  note: --min-volume is ignored for a saved model: it is already fused, so removing a solid"
+                     " now would leave a void where it overlapped a neighbour\n";
+    }
     TopoDS_Shape loaded;
     if (!BinTools::Read(loaded, options.input.c_str()) || loaded.ShapeType() != TopAbs_COMPOUND)
     {
@@ -368,11 +474,11 @@ void MeshAndWeld(std::vector<Body>& bodies, const std::vector<size_t>& which, do
     TopoDS_Shape meshed;
     {
         StageTimer timer("meshing " + std::to_string(which.size()) + " bodies with OCCT (parallel)");
-        meshed = MeshWithFallback(shape, maxDeviation);
+        meshed = MeshWithFallback(shape, maxDeviation, options.meshAngleDeg * kPi / 180.0);
     }
     {
         StageTimer timer("structured meshing of revolved faces");
-        const int structured = RetessellateRevolvedFaces(meshed, maxDeviation, kMeshAngleDeg * kPi / 180.0);
+        const int structured = RetessellateRevolvedFaces(meshed, maxDeviation, options.meshAngleDeg * kPi / 180.0);
         std::cout << "  structured mesh on " << structured << " revolved face(s)\n";
     }
     size_t child = 0;
@@ -439,10 +545,36 @@ void MeshAndWeld(std::vector<Body>& bodies, const std::vector<size_t>& which, do
 // first: ROOT and Geant4 reject degenerate facets. "Zero" is a height below
 // kSliverFraction of the accuracy limit; on cosi_test.step the slivers are
 // 1e-16 to 1e-13 mm high, and the next-thinnest triangles 1e-8 mm.
+//
+// Problems go to 'warnings' rather than straight to the output: a later pass
+// (a local re-fuse, see main) often fixes them, so only the last pass's are
+// printed.
 std::vector<SurfaceMesh> CutAndCount(const std::vector<Body>& bodies, const std::vector<SurfaceMesh>& welded,
-                                     bool cut, double maxDeviation, MeshQuality& quality)
+                                     bool cut, double maxDeviation, MeshQuality& quality,
+                                     std::vector<std::string>& warnings)
 {
+    warnings.clear();
     std::vector<SurfaceMesh> meshes = welded;
+
+    // Slivers and tiny triangles are removed before the cut and after it. A
+    // collapse can push a surface a hair (1e-9 to 1e-7 mm^3 on
+    // cosi_test.step) into a neighbour whose face passes the point without a
+    // vertex there; before the cut that is cut away, after it a collapse is
+    // only made if it leaves every body apart (keepApart). (Cutting such a
+    // hair instead leaves new tiny triangles, so that doesn't converge.)
+    size_t flipped = 0, collapsed = 0, slivers = 0, tiny = 0;
+    auto cleanUp = [&](bool keepApart) {
+        StageTimer timer("removing sliver and tiny triangles");
+        std::vector<size_t> flips(meshes.size(), 0), left(meshes.size(), 0);
+        OSD_Parallel::For(0, static_cast<int>(meshes.size()), [&](int i) {
+            flips[i] = FlipDegenerateTriangles(meshes[i], kSliverFraction * maxDeviation, kMinTriangleArea, left[i]);
+        });
+        flipped += std::accumulate(flips.begin(), flips.end(), size_t(0));
+        slivers = std::accumulate(left.begin(), left.end(), size_t(0));
+        collapsed +=
+            CollapseTinyTriangles(meshes, kMinTriangleArea, kMaxCollapseFraction * maxDeviation, keepApart, tiny);
+    };
+    cleanUp(false);
     if (cut)
     {
         StageTimer timer("cutting every overlap between solid meshes");
@@ -459,24 +591,24 @@ std::vector<SurfaceMesh> CutAndCount(const std::vector<Body>& bodies, const std:
                   << " larger body(ies) lost a total volume of " << report.volumeRemoved << "; "
                   << report.mergedCutters << " cut(s) merged several placements of a part into one cutter; "
                   << report.slitsClosed << " zero-thickness slit(s) closed\n";
-        for (const std::string& problem : report.problems)
-        {
-            std::cout << "  WARNING: " << problem << "\n";
-        }
+        warnings.insert(warnings.end(), report.problems.begin(), report.problems.end());
+        cleanUp(true);
     }
-    std::vector<size_t> flips(meshes.size(), 0), slivers(meshes.size(), 0);
-    OSD_Parallel::For(0, static_cast<int>(meshes.size()), [&](int i) {
-        flips[i] = FlipDegenerateTriangles(meshes[i], kSliverFraction * maxDeviation, slivers[i]);
-    });
-    const size_t flipped = std::accumulate(flips.begin(), flips.end(), size_t(0));
-    const size_t left = std::accumulate(slivers.begin(), slivers.end(), size_t(0));
-    if (flipped > 0)
+    if (flipped > 0 || collapsed > 0)
     {
-        std::cout << "  " << flipped << " sliver triangle(s) (zero area) removed by edge flips\n";
+        std::cout << "  " << flipped << " sliver triangle(s) (zero area) removed by edge flips; " << collapsed
+                  << " tiny triangle edge(s) (area under " << kMinTriangleArea << " mm^2) collapsed\n";
     }
-    if (left > 0)
+    if (slivers > 0)
     {
-        std::cout << "  WARNING: " << left << " sliver triangle(s) (zero area) could not be removed\n";
+        warnings.push_back(std::to_string(slivers) + " sliver triangle(s) (zero area) could not be removed");
+    }
+    if (tiny > 0)
+    {
+        std::ostringstream text;
+        text << tiny << " triangle(s) smaller than " << kMinTriangleArea
+             << " mm^2 are left; ROOT may report them as degenerate";
+        warnings.push_back(text.str());
     }
     quality.openEdges = quality.nonManifoldEdges = 0;
     quality.openEdgesPerBody.assign(meshes.size(), 0);
@@ -545,7 +677,8 @@ int main(int argc, char** argv)
     if (!ParseArguments(argc, argv, options))
     {
         std::cerr << "Usage: " << argv[0]
-                  << " [--max-deviation <d>] [--obj | --geo] [--per-body] [--output-dir <dir>] [--no-repair]"
+                  << " [--max-deviation <d>] [--angular-deflection <deg>] [--min-volume <v>] [--obj] [--stl] [--geo]"
+                     " [--per-body] [--output-dir <dir>] [--no-repair]"
                      " [--no-collisions] [--full-accuracy-check] [--dump-fused <file.brep>] model.step\n";
         return 1;
     }
@@ -565,7 +698,9 @@ int main(int argc, char** argv)
         std::vector<size_t> all(bodies.size());
         std::iota(all.begin(), all.end(), size_t(0));
         MeshAndWeld(bodies, all, maxDeviation, options, welded, quality);
-        std::vector<SurfaceMesh> meshes = CutAndCount(bodies, welded, options.collisions, maxDeviation, quality);
+        std::vector<std::string> cutWarnings; // the last pass's (see CutAndCount)
+        std::vector<SurfaceMesh> meshes =
+            CutAndCount(bodies, welded, options.collisions, maxDeviation, quality, cutWarnings);
 
         // A fused solid whose final mesh isn't closed (PartnersOfMeshDefects):
         // leave the smaller body of each defective pair out of the fuse,
@@ -612,7 +747,7 @@ int main(int argc, char** argv)
                 quality.vertices += mesh.vertices.size();
                 quality.triangles += mesh.triangles.size();
             }
-            meshes = CutAndCount(bodies, welded, options.collisions, maxDeviation, quality);
+            meshes = CutAndCount(bodies, welded, options.collisions, maxDeviation, quality, cutWarnings);
         }
 
         // Saved after the checks, so the bodies they took out of the fuse are
@@ -621,41 +756,56 @@ int main(int argc, char** argv)
         {
             SaveModel(bodies, options.dumpPath);
         }
+        for (const std::string& warning : cutWarnings)
+        {
+            std::cout << "  WARNING: " << warning << "\n";
+        }
         ReportMeshQuality(quality, bodies, maxDeviation);
 
-        // Step 6: one named mesh per part (or per body) in one STL or OBJ file,
-        // or a Geomega geometry.
+        // Step 6: one named mesh per part (or per body), in every format asked
+        // for: OBJ, STL, Geomega.
         const std::vector<OutputObject> objects = GroupBodies(bodies, meshes, options.perBody);
-        const char* extension = options.writeGeo ? ".geo.setup" : options.writeObj ? ".obj" : ".stl";
-        fs::path outputPath = fs::path(options.input).replace_extension(extension);
         if (!options.outputDir.empty())
         {
             fs::create_directories(options.outputDir);
-            outputPath = (fs::path(options.outputDir) / outputPath.filename()).make_preferred();
+        }
+        auto outputPath = [&](const char* extension) {
+            fs::path path = fs::path(options.input).replace_extension(extension);
+            if (!options.outputDir.empty())
+            {
+                path = fs::path(options.outputDir) / path.filename();
+            }
+            return path.make_preferred().string();
+        };
+        const std::string grouping = options.perBody ? "" : " (one per part)";
+        if (options.writeObj)
+        {
+            const std::string path = outputPath(".obj");
+            {
+                StageTimer timer("writing OBJ");
+                ExportObj(objects, meshes, path);
+            }
+            std::cout << "  wrote " << bodies.size() << " bodies as " << objects.size() << " object(s)" << grouping
+                      << " to " << path << "\n";
+        }
+        if (options.writeStl)
+        {
+            const std::string path = outputPath(".stl");
+            {
+                StageTimer timer("writing STL");
+                ExportStl(objects, meshes, path);
+            }
+            std::cout << "  wrote " << bodies.size() << " bodies as " << objects.size() << " object(s)" << grouping
+                      << " to " << path << "\n";
         }
         if (options.writeGeo)
         {
+            const std::string path = outputPath(".geo.setup");
             StageTimer timer("writing Geomega geometry");
             const GeomegaReport report =
-                ExportGeomega(objects, meshes, outputPath.string(), fs::path(options.input).filename().string());
+                ExportGeomega(objects, meshes, path, fs::path(options.input).filename().string());
             std::cout << "  wrote " << report.volumes << " TESSELLATED volume(s) in " << objects.size()
-                      << " object file(s) to " << report.meshDir << ", included by " << outputPath.string() << "\n";
-        }
-        else
-        {
-            {
-                StageTimer timer(options.writeObj ? "writing OBJ" : "writing STL");
-                if (options.writeObj)
-                {
-                    ExportObj(objects, meshes, outputPath.string());
-                }
-                else
-                {
-                    ExportStl(objects, meshes, outputPath.string());
-                }
-            }
-            std::cout << "  wrote " << bodies.size() << " bodies as " << objects.size() << " object(s)"
-                      << (options.perBody ? "" : " (one per part)") << " to " << outputPath.string() << "\n";
+                      << " object file(s) to " << report.meshDir << ", included by " << path << "\n";
         }
     }
     catch (const std::exception& e)

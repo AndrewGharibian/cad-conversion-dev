@@ -57,16 +57,20 @@ For every model in [`tests/data`](tests/data), the tests:
 - convert it to a per-body OBJ, failing on any `WARNING` or `ERROR`;
 - check that OBJ independently with `mesh_check` ([`tests/mesh_check.cpp`](tests/mesh_check.cpp)):
   every solid is closed and consistently oriented, and no two solids overlap;
-- convert it again with the default output (STL, one object per part) into
-  an `--output-dir`, and check that the file is there;
+- convert it again to STL (`--stl`, one object per part) into an
+  `--output-dir`, and check that the file is there;
 - convert it to a Geomega geometry (`--geo`) and check it with `geo_check`
   ([`tests/geo_check.cpp`](tests/geo_check.cpp)) the way MEGAlib reads it:
   valid and unique names, the structure of every volume, and every mesh
-  passing `MDShapeTessellated`'s own mesh check (ported into the test).
+  passing `MDShapeTessellated`'s own mesh check (ported into the test), with
+  no facet ROOT's `TGeoTessellated` would report as degenerate or of zero
+  surface area.
 
 Unit tests check the object names (`naming`) and which bodies count as
-watertight solids (`watertight`), and `shells_removed` checks that the open
-sheet in `ShellTest.step` is removed.
+watertight solids (`watertight`), `shells_removed` checks that the open
+sheet in `ShellTest.step` is removed, and `min_volume` and
+`angular_deflection` check the simplification options, and `formats_default`
+and `formats_stl_geo` which files the format flags write.
 
 Large models aren't committed. Put them in `tests/data/large/` (gitignored):
 they get the `large` label, which the presets skip. Run them with
@@ -85,22 +89,37 @@ cmake --install build/windows --config Release   # -> install/windows/bin (exe +
 cad_converter [options] model.step
 ```
 
-It takes exactly one STEP file and writes `model.stl` next to it (or in
-`--output-dir`). Each stage
+It takes exactly one STEP file and writes `model.obj` next to it (or in
+`--output-dir`). `--obj`, `--stl` and `--geo` choose the outputs, in any
+combination: `--stl --geo` writes both of those and no OBJ, and with none of
+them the output is OBJ. Each stage
 prints its name and duration, followed by a mesh quality report. Problems are
 printed as `WARNING` lines.
 
 | Option | Effect |
 |---|---|
 | `--max-deviation <d>` | Accuracy of the mesh (largest distance from the true surface), in model units. Default: 1/1000 of the model's largest dimension. |
-| `--obj` | Write `model.obj` (Wavefront OBJ, indexed vertices) instead of `model.stl`. |
-| `--geo` | Write a MEGAlib/Geomega geometry instead of `model.stl`: `model.geo.setup` plus one `.geo` mesh file per object in `model_geo/` (see below). |
+| `--angular-deflection <deg>` | Largest angle between neighbouring triangles along a curve. Default 20, which gives every circle at least 18 segments however small it is. Larger values give small round features fewer segments (90: a circle can get as few as 4). `--max-deviation` still holds, except on torus faces (fillets), which OCCT can mesh up to about twice past it once the angle no longer limits them; the report warns when that happens. |
+| `--min-volume <v>` | Remove every solid smaller than `<v>` (model units cubed, e.g. mm³) before anything else is done, so it takes nothing from its neighbours. Ignored for a `.brep` input (already fused). |
+| `--obj` | Write `model.obj` (Wavefront OBJ, indexed vertices). The default when no format is given. |
+| `--stl` | Write `model.stl` (multi-solid ASCII STL). |
+| `--geo` | Write a MEGAlib/Geomega geometry: `model.geo.setup` plus one `.geo` mesh file per object in `model_geo/` (see below). |
 | `--output-dir <dir>` | Write the output file into `<dir>` (created if it doesn't exist) instead of next to the input. |
 | `--per-body` | One object per body (`solid_0001`, `solid_0002`, ...) instead of one per part. |
 | `--no-repair` | Skip checking and repairing the CAD geometry. |
 | `--no-collisions` | Don't make the solids conform: overlaps stay and touching meshes aren't flush. |
 | `--full-accuracy-check` | Measure every triangle's deviation (default: a sample of 200k on large models). |
 | `--dump-fused <file.brep>` | Save the conformed model (no mesh), plus `<file.brep>.parts` and `<file.brep>.meshcut`. Passing that `.brep` as the input skips straight to meshing, for iterating on big models. |
+
+**Simplifying a model.** Two options trade detail that matters little for
+simulation for a much smaller geometry:
+
+- `--min-volume` drops small parts. On COSI, the solids under 100 mm³
+  (483 of 679: screws, washers, small electronics) are 0.034% of the volume
+  but 22.6% of the triangles; under 1000 mm³, 0.18% of the volume and 45%.
+- `--angular-deflection` lets small round features have fewer segments. It
+  only changes features where the angle, not `--max-deviation`, is the
+  tighter limit: small radii, or a coarse `--max-deviation`.
 
 **Output.** By default every **part** (STEP product) is one named object,
 holding all of its placements, since they share a material. Each placement is
@@ -178,8 +197,15 @@ source file, with the reasoning in its header comment.
      body's mesh with Manifold's robust booleans. These come from bodies left
      out of the fuse, interferences the fuse missed, and triangles bulging
      past concave surfaces.
-   - slivers (zero-area triangles, which ROOT and Geant4 reject) are
-     removed by edge flips, without moving the surface.
+   - degenerate triangles are removed, before and after the cut: ROOT's
+     `TGeoTessellated` reports a facet under 1e-10 cm² (1e-8 mm²) as
+     "degenerated" or of "zero surface area". Slivers (a vertex lying on the
+     opposite edge) are removed by edge flips, which leave the surface where
+     it is. Tiny triangles (under 1e-7 mm²) are collapsed: one edge's ends
+     become one point, moved by at most 1/100 of the accuracy limit. Every
+     body with a vertex there moves it too, so touching bodies stay flush.
+     After the cut, a collapse is made only if Manifold confirms that no body
+     overlaps a neighbour afterwards.
    - every solid's mesh is checked to be closed. A defective fused solid
      sends its neighbourhood back to step 3.
 6. **Export** ([`export`](src/export.cpp), [`geomega_export`](src/geomega_export.cpp)):
