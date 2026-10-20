@@ -21,6 +21,7 @@
 
 // Include the header:
 #include "MGUIGeomegaMain.h"
+#include "MGUICADConverter.h"
 
 // Standard libs:
 
@@ -118,6 +119,11 @@ void MGUIGeomegaMain::Create()
   m_TitleIconLayout = new TGLayoutHints(kLHintsCenterY | kLHintsCenterX, 0, 0, 10, 10);
   AddFrame(m_TitleIcon, m_TitleIconLayout);
 
+  // cad convertor step file button 
+  TGTextButton* fBtnImportSTEP = new TGTextButton(this, "Import STEP File", c_ImportSTEP);
+  fBtnImportSTEP->Associate(this);
+  AddFrame(fBtnImportSTEP, new TGLayoutHints(kLHintsCenterX, 5, 5, 20, 10));
+
   // The status bar
   m_StatusBarFile->SetContent("Active:", MFile::GetBaseName(m_Data->GetCurrentFileName()));
   m_StatusBarFile->Create();
@@ -203,6 +209,10 @@ bool MGUIGeomegaMain::ProcessMessage(long Message, long Parameter1,
       case c_Test:
         m_Interface->TestOnly();
         break;
+
+      case c_ImportSTEP:
+      new MGUICADConverter(gClient->GetRoot(), this, 450, 430);
+      break;
 
       default:
         break;

@@ -83,6 +83,7 @@ LIBRARY_UI := GeomegaGui
 FILES_UI := \
 	MInterfaceGeomega \
 	MGUIGeomegaMain \
+	MGUICADConverter \
 	MGUIPosition \
 	MGUIPathLength 
 

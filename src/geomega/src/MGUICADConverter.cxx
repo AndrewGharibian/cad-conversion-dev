@@ -1,4 +1,4 @@
-#include "../inc/MGUICADConverter.h"
+#include "MGUICADConverter.h"
 #include <TGFileDialog.h>
 #include <iostream>
 #include <TG3DLine.h>
@@ -16,72 +16,67 @@ MGUICADConverter::MGUICADConverter(const TGWindow* p, const TGWindow* main, UInt
   : TGTransientFrame(p, main, w, h) {
 
   SetCleanup(kDeepCleanup);
-  TGLayoutHints* expandX = new TGLayoutHints(kLHintsExpandX, 5, 5, 5, 5);
-  TGLayoutHints* leftAlign = new TGLayoutHints(kLHintsLeft, 5, 5, 5, 5);
+  
+  TGLayoutHints* layoutTop = new TGLayoutHints(kLHintsTop | kLHintsExpandX, 5, 5, 5, 5);
+  TGLayoutHints* layoutLeft = new TGLayoutHints(kLHintsTop | kLHintsLeft, 5, 5, 5, 5);
+  TGLayoutHints* layoutRow = new TGLayoutHints(kLHintsLeft | kLHintsCenterY, 5, 5, 5, 5);
 
-  // 1. Source File
   fBtnSelectFile = new TGTextButton(this, "Get STEP File", c_SelectFile);
   fBtnSelectFile->Associate(this);
-  AddFrame(fBtnSelectFile, expandX);
+  AddFrame(fBtnSelectFile, layoutTop);
 
   fStatusLabel = new TGLabel(this, "No file selected");
-  AddFrame(fStatusLabel, expandX);
+  AddFrame(fStatusLabel, layoutTop);
 
-  AddFrame(new TGHorizontal3DLine(this), expandX);
+  AddFrame(new TGHorizontal3DLine(this), layoutTop);
 
-  // 2. Options (Formats)
-  AddFrame(new TGLabel(this, "Output Formats (Defaults to .geo if none checked):"), leftAlign);
+  AddFrame(new TGLabel(this, "Output Formats (Defaults to .geo if none checked):"), layoutLeft);
   TGHorizontalFrame* fFrameFormats = new TGHorizontalFrame(this);
   fCheckGeo = new TGCheckButton(fFrameFormats, ".geo");
   fCheckObj = new TGCheckButton(fFrameFormats, ".obj");
   fCheckStl = new TGCheckButton(fFrameFormats, ".stl");
-  fFrameFormats->AddFrame(fCheckGeo, leftAlign);
-  fFrameFormats->AddFrame(fCheckObj, leftAlign);
-  fFrameFormats->AddFrame(fCheckStl, leftAlign);
-  AddFrame(fFrameFormats, expandX);
+  fFrameFormats->AddFrame(fCheckGeo, layoutRow);
+  fFrameFormats->AddFrame(fCheckObj, layoutRow);
+  fFrameFormats->AddFrame(fCheckStl, layoutRow);
+  AddFrame(fFrameFormats, layoutTop);
 
-  // 3. Tessellation Values
   TGHorizontalFrame* fFrameAng = new TGHorizontalFrame(this);
-  fFrameAng->AddFrame(new TGLabel(fFrameAng, "Angular Deflection:"), leftAlign);
+  fFrameAng->AddFrame(new TGLabel(fFrameAng, "Angular Deflection:"), layoutRow);
   fNumAngDef = new TGNumberEntry(fFrameAng, 0.5, 6, -1, TGNumberFormat::kNESReal);
-  fFrameAng->AddFrame(fNumAngDef, leftAlign);
-  AddFrame(fFrameAng, expandX);
+  fFrameAng->AddFrame(fNumAngDef, layoutRow);
+  AddFrame(fFrameAng, layoutTop);
 
   TGHorizontalFrame* fFrameDev = new TGHorizontalFrame(this);
-  fFrameDev->AddFrame(new TGLabel(fFrameDev, "Max Deviation:"), leftAlign);
+  fFrameDev->AddFrame(new TGLabel(fFrameDev, "Max Deviation:"), layoutRow);
   fNumMaxDev = new TGNumberEntry(fFrameDev, 0.1, 6, -1, TGNumberFormat::kNESReal);
-  fFrameDev->AddFrame(fNumMaxDev, leftAlign);
-  AddFrame(fFrameDev, expandX);
+  fFrameDev->AddFrame(fNumMaxDev, layoutRow);
+  AddFrame(fFrameDev, layoutTop);
 
   TGHorizontalFrame* fFrameVol = new TGHorizontalFrame(this);
-  fFrameVol->AddFrame(new TGLabel(fFrameVol, "Min Volume:"), leftAlign);
+  fFrameVol->AddFrame(new TGLabel(fFrameVol, "Min Volume:"), layoutRow);
   fNumMinVol = new TGNumberEntry(fFrameVol, 0.001, 6, -1, TGNumberFormat::kNESReal);
-  fFrameVol->AddFrame(fNumMinVol, leftAlign);
-  AddFrame(fFrameVol, expandX);
+  fFrameVol->AddFrame(fNumMinVol, layoutRow);
+  AddFrame(fFrameVol, layoutTop);
 
- // 4. File Destination
   TGHorizontalFrame* fFrameDest = new TGHorizontalFrame(this);
   fDestPath = new TGTextEntry(fFrameDest, "Destination defaults to source file directory...");
   fDestPath->SetEnabled(kFALSE);
-  fFrameDest->AddFrame(fDestPath, new TGLayoutHints(kLHintsExpandX, 5, 5, 5, 5));
-  
-  // Change the text on this button here:
+  fFrameDest->AddFrame(fDestPath, new TGLayoutHints(kLHintsLeft | kLHintsCenterY | kLHintsExpandX, 5, 5, 5, 5));
   fBtnDestBrowse = new TGTextButton(fFrameDest, "File Destination", c_SelectDest);
-  
   fBtnDestBrowse->Associate(this);
-  fFrameDest->AddFrame(fBtnDestBrowse, leftAlign);
-  AddFrame(fFrameDest, expandX);
+  fFrameDest->AddFrame(fBtnDestBrowse, layoutRow);
+  AddFrame(fFrameDest, layoutTop);
 
-  // 5. Convert Button
+  AddFrame(new TGHorizontal3DLine(this), layoutTop);
+
   fBtnConvert = new TGTextButton(this, "Convert", c_Convert);
   fBtnConvert->Associate(this);
-  AddFrame(fBtnConvert, expandX);
+  AddFrame(fBtnConvert, layoutTop);
 
-  // 6. View in Geomega Button
   fBtnViewGeomega = new TGTextButton(this, "View in Geomega", c_ViewGeomega);
   fBtnViewGeomega->Associate(this);
-  fBtnViewGeomega->SetEnabled(kFALSE); // Disabled until conversion is done
-  AddFrame(fBtnViewGeomega, expandX);
+  fBtnViewGeomega->SetEnabled(kFALSE);
+  AddFrame(fBtnViewGeomega, layoutTop);
 
   MapSubwindows();
   Resize(450, 430);
@@ -99,8 +94,6 @@ void MGUICADConverter::OnSelectFile() {
   if (fileInfo.fFilename) {
     fInputFilePath = fileInfo.fFilename;
     fStatusLabel->SetText(Form("Selected: %s", fInputFilePath.Data()));
-    
-    // Auto-set destination to source file's directory
     fOutputDir = gSystem->DirName(fInputFilePath);
     fDestPath->SetText(fOutputDir.Data());
     Layout();
@@ -125,7 +118,6 @@ void MGUICADConverter::OnConvert() {
     return;
   }
 
-  // Handle format default logic
   bool doGeo = fCheckGeo->IsOn();
   bool doObj = fCheckObj->IsOn();
   bool doStl = fCheckStl->IsOn();
@@ -135,12 +127,10 @@ void MGUICADConverter::OnConvert() {
     doGeo = true;
   }
 
-  // Grab numbers
   double angDef = fNumAngDef->GetNumber();
   double maxDev = fNumMaxDev->GetNumber();
   double minVol = fNumMinVol->GetNumber();
 
-  // Create expected output filename (.geo) for the "View in Geomega" button
   TString baseName = gSystem->BaseName(fInputFilePath);
   if (baseName.EndsWith(".step")) baseName.ReplaceAll(".step", ".geo");
   else if (baseName.EndsWith(".stp")) baseName.ReplaceAll(".stp", ".geo");
@@ -156,7 +146,6 @@ void MGUICADConverter::OnConvert() {
   std::cout << "Params - AngDef: " << angDef << ", MaxDev: " << maxDev << ", MinVol: " << minVol << std::endl;
   std::cout << "------------------------" << std::endl;
 
-  // Unlock the View in Geomega button
   fBtnViewGeomega->SetEnabled(kTRUE);
   Layout();
 }
