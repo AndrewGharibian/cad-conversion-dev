@@ -2,8 +2,11 @@
 // cad_converter — convert a STEP model into simulation-ready meshes for
 // MEGAlib/Geant4.
 //
+//   cad_converter [options] --input model.step
 //   cad_converter [options] model.step
 //
+//   --input <file>        the STEP file to convert (or give it without the
+//                         flag); exactly one input
 //   --max-deviation <d>   accuracy of the output mesh, in model units
 //                         (default: 1/1000 of the model's largest dimension)
 //   --angular-deflection <deg>
@@ -21,7 +24,7 @@
 //                         Any combination of --obj, --stl and --geo can be
 //                         given; with none, the output is model.obj.
 //   --output-dir <dir>    write the output files into <dir> (created if
-//                         missing) instead of next to the input
+//                         missing); default: the input file's directory
 //   --per-body            write every body as its own object (solid_NNNN, ...),
 //                         instead of one object per part (all its placements)
 //   --no-repair           skip checking and repairing the CAD geometry
@@ -193,6 +196,10 @@ bool ParseArguments(int argc, char** argv, Options& options)
         {
             options.fullAccuracyCheck = true;
         }
+        else if (arg == "--input" && i + 1 < argc)
+        {
+            inputs.push_back(argv[++i]);
+        }
         else if (arg == "--output-dir" && i + 1 < argc)
         {
             options.outputDir = argv[++i];
@@ -213,6 +220,7 @@ bool ParseArguments(int argc, char** argv, Options& options)
     }
     if (inputs.size() != 1)
     {
+        std::cerr << (inputs.empty() ? "No input file given\n" : "Only one input file can be given\n");
         return false;
     }
     if (!options.writeObj && !options.writeStl && !options.writeGeo)
@@ -679,7 +687,8 @@ int main(int argc, char** argv)
         std::cerr << "Usage: " << argv[0]
                   << " [--max-deviation <d>] [--angular-deflection <deg>] [--min-volume <v>] [--obj] [--stl] [--geo]"
                      " [--per-body] [--output-dir <dir>] [--no-repair]"
-                     " [--no-collisions] [--full-accuracy-check] [--dump-fused <file.brep>] model.step\n";
+                     " [--no-collisions] [--full-accuracy-check] [--dump-fused <file.brep>]"
+                     " (--input model.step | model.step)\n";
         return 1;
     }
 

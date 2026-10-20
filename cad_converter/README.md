@@ -70,7 +70,8 @@ Unit tests check the object names (`naming`) and which bodies count as
 watertight solids (`watertight`), `shells_removed` checks that the open
 sheet in `ShellTest.step` is removed, and `min_volume` and
 `angular_deflection` check the simplification options, and `formats_default`
-and `formats_stl_geo` which files the format flags write.
+and `formats_stl_geo` which files the format flags write, and `input_flag` and
+`input_twice` the input argument.
 
 Large models aren't committed. Put them in `tests/data/large/` (gitignored):
 they get the `large` label, which the presets skip. Run them with
@@ -86,10 +87,11 @@ cmake --install build/windows --config Release   # -> install/windows/bin (exe +
 ## 3. Usage
 
 ```bash
-cad_converter [options] model.step
+cad_converter [options] --input model.step
+cad_converter [options] model.step   # the same, without the flag
 ```
 
-It takes exactly one STEP file and writes `model.obj` next to it (or in
+It takes exactly one STEP file (`--input`, or just the path) and writes `model.obj` next to it (or in
 `--output-dir`). `--obj`, `--stl` and `--geo` choose the outputs, in any
 combination: `--stl --geo` writes both of those and no OBJ, and with none of
 them the output is OBJ. Each stage
@@ -104,7 +106,8 @@ printed as `WARNING` lines.
 | `--obj` | Write `model.obj` (Wavefront OBJ, indexed vertices). The default when no format is given. |
 | `--stl` | Write `model.stl` (multi-solid ASCII STL). |
 | `--geo` | Write a MEGAlib/Geomega geometry: `model.geo.setup` plus one `.geo` mesh file per object in `model_geo/` (see below). |
-| `--output-dir <dir>` | Write the output file into `<dir>` (created if it doesn't exist) instead of next to the input. |
+| `--input <file>` | The STEP file to convert. It can also be given without the flag; exactly one input. |
+| `--output-dir <dir>` | Write the output files into `<dir>` (created if it doesn't exist). Default: the input file's directory. |
 | `--per-body` | One object per body (`solid_0001`, `solid_0002`, ...) instead of one per part. |
 | `--no-repair` | Skip checking and repairing the CAD geometry. |
 | `--no-collisions` | Don't make the solids conform: overlaps stay and touching meshes aren't flush. |

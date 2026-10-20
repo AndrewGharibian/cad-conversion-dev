@@ -152,3 +152,17 @@ add_test(NAME formats_stl_geo
 set_tests_properties(formats_stl_geo PROPERTIES
     PASS_REGULAR_EXPRESSION "wrote [^\n]*AssemblyTest[.]stl[^~]*included by [^\n]*AssemblyTest[.]geo[.]setup"
     FAIL_REGULAR_EXPRESSION "ERROR;WARNING;[.]obj")
+
+# --input: without --output-dir, the output goes next to the input file.
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/data/AssemblyTest.step"
+    "${CMAKE_CURRENT_BINARY_DIR}/input_flag/AssemblyTest.step" COPYONLY)
+add_test(NAME input_flag
+    COMMAND cad_converter --input "${CMAKE_CURRENT_BINARY_DIR}/input_flag/AssemblyTest.step")
+set_tests_properties(input_flag PROPERTIES
+    PASS_REGULAR_EXPRESSION "wrote [^\n]*input_flag[/\\]AssemblyTest[.]obj"
+    FAIL_REGULAR_EXPRESSION "ERROR;WARNING")
+# Two inputs are an error.
+add_test(NAME input_twice
+    COMMAND cad_converter --input "${CMAKE_CURRENT_SOURCE_DIR}/data/AssemblyTest.step"
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/ConeTest.step")
+set_tests_properties(input_twice PROPERTIES WILL_FAIL TRUE)

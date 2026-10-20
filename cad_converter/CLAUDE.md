@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) when working in `cad_converter/`. See 
 
 ## Requirements (from the user)
 
-- Exactly one STEP file as input. Outputs: OBJ (`--obj`), STL (`--stl`) and a MEGAlib/Geomega geometry (`--geo`), in any combination of the flags given; with none, OBJ only. One named object per part (`--per-body`: per body), written next to the input or into `--output-dir`.
+- Exactly one STEP file as input (`--input <file>`, or as a bare argument). Outputs: OBJ (`--obj`), STL (`--stl`) and a MEGAlib/Geomega geometry (`--geo`), in any combination of the flags given; with none, OBJ only. One named object per part (`--per-body`: per body), written next to the input or into `--output-dir`.
 - Geomega output (`--geo`): each object's mesh data goes in its own `.geo` file (one `TESSELLATED` volume per body, in the format `MDShapeTessellated` parses), included by `model.geo.setup`, where the materials are set (placeholders for now). The team's shape class and example files are in `../claude_resources/shapes/`, and the Geomega parser is in `../claude_resources/geomega/`.
 - Object names (default mode): the part's name if known, otherwise `mesh1`, `mesh2`, ... in output order. A part placed n > 1 times gets `_instanced<n>` appended; n counts placements, not bodies, because one placement can hold several bodies (`Body::partBodies`).
 - Only watertight solids are converted. Shells and loose faces are removed when the STEP file is read, and solids still open after repair are removed with a warning. Every body is therefore a solid.
@@ -19,7 +19,7 @@ Guidance for Claude Code (claude.ai/code) when working in `cad_converter/`. See 
 
 `VCPKG_ROOT` must be set. Then: `cmake --preset windows`, `cmake --build --preset windows-release`, `ctest --preset windows-release` (Linux: `linux-release` / `linux-debug`).
 
-- Each model in `tests/data` gets four tests: `convert.<model>`, `check.<model>`, `convert_stl.<model>` (into an `--output-dir`) and `stl_written.<model>`. `mesh_check` independently verifies closedness, orientation and the absence of overlaps on the `--per-body` OBJ. Each model also gets `convert_geo.<model>` and `geo_check.<model>`; `geo_check` reads the `--geo` output the way Geomega does and runs a port of `MDShapeTessellated::CheckMesh` on every volume. Other tests: `naming`, `watertight`, `shells_removed` (on `ShellTest.step`), `min_volume`, `angular_deflection` and the output-format tests `formats_default` / `formats_stl_geo`.
+- Each model in `tests/data` gets four tests: `convert.<model>`, `check.<model>`, `convert_stl.<model>` (into an `--output-dir`) and `stl_written.<model>`. `mesh_check` independently verifies closedness, orientation and the absence of overlaps on the `--per-body` OBJ. Each model also gets `convert_geo.<model>` and `geo_check.<model>`; `geo_check` reads the `--geo` output the way Geomega does and runs a port of `MDShapeTessellated::CheckMesh` on every volume. Other tests: `naming`, `watertight`, `shells_removed` (on `ShellTest.step`), `min_volume`, `angular_deflection` and the output-format tests `formats_default` / `formats_stl_geo`, and `input_flag` / `input_twice`.
 - Large models go in `tests/data/large/` (gitignored, label `large`).
 - The build is warning-free (`/W3`, `-Wall -Wextra`). OCCT 8 deprecates the `TopTools_*` container names: use the aliases in `src/occt_types.hpp`.
 - When changing the pipeline, compare outputs before and after. Outputs are deterministic, so unchanged behaviour means byte-identical STL/OBJ files.
