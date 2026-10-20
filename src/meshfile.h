@@ -14,5 +14,13 @@ struct MeshFile
     std::vector<Triangle> triangles;
 };
 
+struct NamedMesh
+{
+    std::string name;
+    MeshFile mesh;
+};
+
 bool ReadMeshFile(const std::string& path, MeshFile& mesh, std::string& error);
+bool ReadOBJObjects(const std::string& path, std::vector<NamedMesh>& meshes,
+                    std::string& error);
 bool ValidateMesh(MeshFile& mesh, std::string& error);

@@ -30,9 +30,13 @@ centimeters.
 
 ## Output and known limitation
 
-The converter writes inline Geomega `TESSELLATED` vertices and facets using
-the format from MEGAlib's `MDShapeTessellated::GetGeomega`, plus a `World`
-volume and standard material definitions.
+For STL inputs, the converter writes inline Geomega `TESSELLATED` vertices
+and facets. For OBJ inputs, each `o` object is validated and converted
+independently. The converter writes the main setup file plus a sibling
+`<output-name>_meshes/` directory containing a subdirectory per object, with
+its centimeter-scaled, triangulated OBJ and an included `.geo.setup` file that
+references it. The main setup file declares `World` and includes each object
+setup. Keep the mesh directory with the main setup file.
 
 The local Geomega parser accepts and validates this shape format, but the
 local Cosima Geant4 construction currently reports `TESSELLATED` as an

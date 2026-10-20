@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <sstream>
+#include <utility>
 
 namespace
 {
@@ -185,6 +186,39 @@ bool ParseOBJIndex(const std::string& token, std::size_t vertexCount,
 
 bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
 {
+    std::vector<NamedMesh> objects;
+    if (!ReadOBJObjects(path, objects, error))
+        return false;
+
+    mesh.vertices.clear();
+    mesh.triangles.clear();
+    for (const NamedMesh& object : objects)
+    {
+        if (object.mesh.vertices.size() >
+            std::numeric_limits<std::uint32_t>::max() - mesh.vertices.size())
+        {
+            error = "OBJ contains too many vertices";
+            return false;
+        }
+        const std::uint32_t vertexOffset =
+            static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.insert(mesh.vertices.end(), object.mesh.vertices.begin(),
+                             object.mesh.vertices.end());
+        for (const MeshFile::Triangle& triangle : object.mesh.triangles)
+        {
+            mesh.triangles.push_back({triangle[0] + vertexOffset,
+                                      triangle[1] + vertexOffset,
+                                      triangle[2] + vertexOffset});
+        }
+    }
+    return true;
+}
+
+}
+
+bool ReadOBJObjects(const std::string& path, std::vector<NamedMesh>& meshes,
+                    std::string& error)
+{
     std::ifstream input(path);
     if (!input)
     {
@@ -192,8 +226,15 @@ bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
         return false;
     }
 
-    mesh.vertices.clear();
-    mesh.triangles.clear();
+    struct RawObject
+    {
+        std::string name = "Mesh";
+        std::vector<MeshFile::Triangle> triangles;
+    };
+
+    std::vector<MeshFile::Vertex> vertices;
+    std::vector<RawObject> rawObjects;
+    RawObject currentObject;
     std::string line;
     std::size_t lineNumber = 0;
     while (std::getline(input, line))
@@ -204,7 +245,23 @@ bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
         if (!(lineInput >> kind) || kind[0] == '#')
             continue;
 
-        if (kind == "v")
+        if (kind == "o")
+        {
+            if (!currentObject.triangles.empty())
+                rawObjects.push_back(std::move(currentObject));
+            currentObject = RawObject{};
+            std::getline(lineInput, currentObject.name);
+            const std::size_t first = currentObject.name.find_first_not_of(" \t");
+            if (first == std::string::npos)
+                currentObject.name = "Mesh";
+            else
+            {
+                currentObject.name.erase(0, first);
+                const std::size_t last = currentObject.name.find_last_not_of(" \t\r");
+                currentObject.name.erase(last + 1);
+            }
+        }
+        else if (kind == "v")
         {
             MeshFile::Vertex vertex;
             if (!(lineInput >> vertex[0] >> vertex[1] >> vertex[2]))
@@ -212,12 +269,12 @@ bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
                 error = "OBJ has an invalid vertex on line " + std::to_string(lineNumber);
                 return false;
             }
-            if (mesh.vertices.size() == std::numeric_limits<std::uint32_t>::max())
+            if (vertices.size() == std::numeric_limits<std::uint32_t>::max())
             {
                 error = "OBJ contains too many vertices";
                 return false;
             }
-            mesh.vertices.push_back(vertex);
+            vertices.push_back(vertex);
         }
         else if (kind == "f")
         {
@@ -228,7 +285,7 @@ bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
                 if (!token.empty() && token[0] == '#')
                     break;
                 std::uint32_t index = 0;
-                if (!ParseOBJIndex(token, mesh.vertices.size(), index))
+                if (!ParseOBJIndex(token, vertices.size(), index))
                 {
                     error = "OBJ has an invalid face index on line " +
                             std::to_string(lineNumber);
@@ -243,24 +300,51 @@ bool ReadOBJ(const std::string& path, MeshFile& mesh, std::string& error)
                 return false;
             }
             const std::size_t maxTriangles = std::numeric_limits<std::uint32_t>::max();
-            if (mesh.triangles.size() > maxTriangles ||
-                indices.size() - 2 > maxTriangles - mesh.triangles.size())
+            if (currentObject.triangles.size() > maxTriangles ||
+                indices.size() - 2 > maxTriangles - currentObject.triangles.size())
             {
                 error = "OBJ contains too many triangles";
                 return false;
             }
             for (std::size_t i = 1; i + 1 < indices.size(); ++i)
-                mesh.triangles.push_back({indices[0], indices[i], indices[i + 1]});
+                currentObject.triangles.push_back({indices[0], indices[i], indices[i + 1]});
         }
     }
 
-    if (mesh.triangles.empty())
+    if (!currentObject.triangles.empty())
+        rawObjects.push_back(std::move(currentObject));
+    if (rawObjects.empty())
     {
         error = "OBJ contains no faces";
         return false;
     }
+
+    meshes.clear();
+    for (const RawObject& rawObject : rawObjects)
+    {
+        NamedMesh object;
+        object.name = rawObject.name;
+        std::map<std::uint32_t, std::uint32_t> remap;
+        for (const MeshFile::Triangle& triangle : rawObject.triangles)
+        {
+            MeshFile::Triangle localizedTriangle;
+            for (unsigned int i = 0; i < 3; ++i)
+            {
+                auto found = remap.find(triangle[i]);
+                if (found == remap.end())
+                {
+                    const auto nextIndex =
+                        static_cast<std::uint32_t>(object.mesh.vertices.size());
+                    object.mesh.vertices.push_back(vertices[triangle[i]]);
+                    found = remap.emplace(triangle[i], nextIndex).first;
+                }
+                localizedTriangle[i] = found->second;
+            }
+            object.mesh.triangles.push_back(localizedTriangle);
+        }
+        meshes.push_back(std::move(object));
+    }
     return true;
-}
 }
 
 bool ReadMeshFile(const std::string& path, MeshFile& mesh, std::string& error)
